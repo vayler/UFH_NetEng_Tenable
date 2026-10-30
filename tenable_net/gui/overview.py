@@ -41,7 +41,7 @@ class OverviewTab(QWidget):
             "high": KpiCard("High", SEVERITY_COLORS["high"]),
             "exploitable": KpiCard("Exploit available", "#6a1b9a"),
             "max_vpr": KpiCard("Highest VPR", "#00838f"),
-            "hardware": KpiCard("Past LDoS / not covered", "#4e342e"),
+            "hardware": KpiCard("Not covered / SW upgrade", "#4e342e"),
         }
         cards_row = QHBoxLayout()
         for card in self.cards.values():
@@ -111,14 +111,17 @@ class OverviewTab(QWidget):
         if inventory is None or inventory.empty:
             card.hide()
             return
-        from tenable_net.inventory import device_summary
+        from tenable_net.inventory import device_summary, has_lifecycle
 
         devices = device_summary(inventory)
-        past = int((devices["lifecycle"] == "Past LDoS").sum())
         uncovered = int((devices["contract"] == "Not covered").sum())
-        card.set_value(f"{past:,} / {uncovered:,}")
-        card.setToolTip(f"{past} devices past Last Date of Support, {uncovered} with hardware not under "
-                        f"contract (of {len(devices)} inventoried). See the Devices tab filters.")
+        upgrade = int((devices["sw_status"] == "Upgrade suggested").sum())
+        tip = (f"{uncovered} devices have hardware not under contract and {upgrade} run a release older than "
+               f"Cisco's suggested one (of {len(devices)} inventoried).")
+        if has_lifecycle(inventory):
+            tip += f" {int((devices['lifecycle'] == 'Past LDoS').sum())} are past last date of support."
+        card.set_value(f"{uncovered:,} / {upgrade:,}")
+        card.setToolTip(tip + " See the Devices tab filters.")
         card.show()
 
     def _severity_chart(self, findings):

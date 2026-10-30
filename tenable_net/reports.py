@@ -104,9 +104,10 @@ def excel_safe(df):
 
 
 HARDWARE_COLUMNS = [
-    "hostname", "in_tenable", "member", "model", "serial", "sw_version", "lifecycle", "end_of_sale",
-    "end_of_sw_maint", "ldos", "migration_pid", "contract", "contract_end", "service_level", "orderable_pid",
-    "source", "akips_device", "ip", "bulletin_url",
+    "hostname", "in_tenable", "member", "model", "serial", "sw_version", "recommended_sw", "sw_status",
+    "contract", "contract_end", "contract_number", "service_level", "warranty_end", "product_line_end",
+    "orderable_pid", "lifecycle", "end_of_sale", "end_of_sw_maint", "ldos", "migration_pid", "bulletin_url",
+    "source", "akips_device", "ip",
 ]
 
 
@@ -117,7 +118,8 @@ def by_device_with_hardware(findings, inventory=None):
         return devices
     from tenable_net.inventory import device_summary
 
-    hw = device_summary(inventory)[["hostname", "model", "lifecycle", "ldos", "contract", "contract_end"]]
+    hw = device_summary(inventory)[["hostname", "model", "contract", "contract_end", "sw_status", "recommended_sw",
+                                    "lifecycle", "ldos"]]
     return devices.merge(hw, on="hostname", how="left")
 
 

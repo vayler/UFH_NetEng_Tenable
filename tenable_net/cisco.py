@@ -1,12 +1,17 @@
-"""Cisco Support API client: EoX (lifecycle dates) and SN2INFO (contract coverage).
+"""Cisco Support API client.
 
-Endpoints follow Cisco's Support API docs; hosts and the token URL are overridable via .env
-(CISCO_API_BASE, CISCO_TOKEN_URL) in case your API registration uses different ones.
+Three APIs, each optional (CISCO_APIS in .env / Settings picks the ones your API app has):
+  sn2info   Serial Number to Information: contract coverage, base/orderable PID by serial
+  software  Software Suggestion v2: Cisco-suggested releases by product ID
+  eox       EoX: end-of-sale / last-date-of-support by serial or product ID
+
+Hosts and the token URL are overridable via .env (CISCO_API_BASE, CISCO_TOKEN_URL).
 Results are cached in cache/cisco.json so repeat runs don't re-query Cisco.
 """
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,8 +25,12 @@ DEFAULT_API_BASE = "https://apix.cisco.com"
 EOX_SERIAL_PATH = "/supporttools/eox/rest/5/EOXBySerialNumber/{page}/{items}"
 EOX_PID_PATH = "/supporttools/eox/rest/5/EOXByProductID/{page}/{items}"
 COVERAGE_PATH = "/sn2info/v2/coverage/summary/serial_numbers/{items}"
+SOFTWARE_PATH = "/software/suggestion/v2/suggestions/releases/productIds/{items}?pageIndex={page}"
 EOX_BATCH = 20
 COVERAGE_BATCH = 75
+SOFTWARE_BATCH = 10
+API_NAMES = {"sn2info": "Serial Number to Info", "software": "Software Suggestion", "eox": "EoX"}
+DEFAULT_APIS = ("sn2info", "software")
 CACHE_FILE = "cisco.json"
 TTL_DAYS = 7
 
@@ -85,14 +94,68 @@ def parse_coverage(payload):
             continue
         covered = str(rec.get("is_covered") or "").upper()
         pids = rec.get("orderable_pid_list") or []
+        bases = rec.get("base_pid_list") or []
         out[serial] = {
             "covered": {"YES": True, "NO": False}.get(covered),
             "contract_end": rec.get("coverage_end_date") or None,
+            "contract_number": rec.get("service_contract_number") or None,
             "service_level": rec.get("service_line_descr") or None,
             "warranty_end": rec.get("warranty_end_date") or None,
+            "product_line_end": rec.get("covered_product_line_end_date") or None,
             "orderable_pid": (pids[0].get("orderable_pid") if pids and isinstance(pids[0], dict) else None),
+            "base_pid": (bases[0].get("base_pid") if bases and isinstance(bases[0], dict) else None),
         }
     return out
+
+
+NON_OS_SOFTWARE = re.compile(r"rommon|boot|firmware|fpga|bios|capwap|ap software", re.I)
+
+
+def parse_software(payload, requested=()):
+    """Map product ID -> {"product_name", "releases": [{release, date, suggested, software_type}]}.
+
+    Field names follow Cisco's Software Suggestion v2 responses (productList / product / suggestions);
+    lookups are defensive because the shape varies by product. Requested PIDs that Cisco reports under
+    their base PID (e.g. C9300-48P-E -> C9300-48P) are mapped back by prefix.
+    """
+    products = payload.get("productList")
+    if products is None:
+        raise CiscoApiError(f"Software Suggestion: {_error_message(payload) or 'response has no productList'}")
+    out = {}
+    for item in products or []:
+        prod = item.get("product") or {}
+        pid = str(prod.get("basePID") or prod.get("basePid") or item.get("productId") or "").strip().upper()
+        if not pid and len(requested) == 1:
+            pid = requested[0].upper()
+        if not pid:
+            continue
+        entry = out.setdefault(pid, {"product_name": prod.get("productName"), "releases": []})
+        for sug in item.get("suggestions") or []:
+            if sug.get("errorDetailsResponse"):
+                continue
+            release = sug.get("releaseFormat1") or sug.get("relDispName") or sug.get("releaseFormat2")
+            if not release:
+                continue
+            entry["releases"].append({
+                "release": str(release).strip(),
+                "date": sug.get("releaseDate") or None,
+                "suggested": str(sug.get("isSuggested", "")).strip().upper() in ("Y", "YES", "TRUE"),
+                "software_type": prod.get("softwareType") or sug.get("softwareType") or "",
+            })
+    for req in requested:  # orderable or longer PIDs reported under a shorter base PID
+        key = req.upper()
+        if key not in out:
+            base = max((p for p in out if key.startswith(p)), key=len, default=None)
+            if base:
+                out[key] = out[base]
+    return out
+
+
+def suggested_releases(entry):
+    """Cisco-suggested OS releases for a product (ROMMON / firmware suggestions left out)."""
+    releases = [r for r in (entry or {}).get("releases", []) if not NON_OS_SOFTWARE.search(r.get("software_type") or "")]
+    suggested = [r["release"] for r in releases if r.get("suggested")]
+    return list(dict.fromkeys(suggested or [r["release"] for r in releases]))
 
 
 class CiscoClient:
@@ -176,41 +239,86 @@ class CiscoClient:
             out.update(parse_coverage(self._get(COVERAGE_PATH.format(items=",".join(batch)))))
         return out
 
+    def software(self, pids):
+        """Suggested releases per product ID. One unknown PID can make Cisco reject a whole batch
+        (S3_INV_BASEPID), so a rejected batch is retried one PID at a time."""
+        out = {}
+        for batch in _batches(pids, SOFTWARE_BATCH):
+            try:
+                out.update(self._software_batch(batch))
+            except CiscoApiError as exc:
+                if str(exc).startswith("HTTP 4") or len(batch) == 1:
+                    raise
+                for pid in batch:
+                    try:
+                        out.update(self._software_batch([pid]))
+                    except CiscoApiError as single:
+                        if str(single).startswith("HTTP 4"):
+                            raise
+        return out
 
-# A long-retired PID with published EoX dates: a reliable probe that the EoX API answers.
+    def _software_batch(self, batch):
+        out, page, last = {}, 1, 1
+        while page <= last:
+            payload = self._get(SOFTWARE_PATH.format(items=",".join(batch), page=page))
+            for pid, entry in parse_software(payload, batch).items():
+                out.setdefault(pid, {"product_name": entry["product_name"], "releases": []})["releases"] += entry["releases"]
+            pages = payload.get("paginationResponseRecord") or {}
+            last = int(pages.get("lastIndex") or pages.get("LastIndex") or 1)
+            page += 1
+        return out
+
+
+# Probes: a long-retired PID with published EoX dates, and a current PID with suggested releases.
 PROBE_PID = "WS-C3750X-48P-S"
+PROBE_SOFTWARE_PID = "C9300-48P"
 
 
 def diagnose(client, serial=None, pid=None):
-    """Check each API the app uses. Returns [(name, ok, detail)]; never raises for API errors."""
-    results = []
+    """Check the token and every API. Returns [(key, name, ok, detail)], ok None = skipped.
+
+    Never raises for API errors, so it can tell you which APIs your Cisco API app has."""
     try:
         client.token()
-        results.append(("Token", True, "issued"))
     except Exception as exc:  # noqa: BLE001
-        return [("Token", False, str(exc)[:200])]
-    pids = [PROBE_PID] + ([pid] if pid and pid.upper() != PROBE_PID else [])
-    try:
-        recs = client.eox_by_pid(pids)
-        parts = []
-        for p in pids:
-            rec = recs.get(p.upper())
-            parts.append(f"{p}: LDoS {rec['ldos']}" if rec and rec.get("ldos")
-                         else f"{p}: {rec.get('eox_status') if rec else 'no record'}")
-        results.append(("EoX", True, "; ".join(parts)))
-    except Exception as exc:  # noqa: BLE001
-        results.append(("EoX", False, str(exc)[:200]))
+        return [("token", "Token", False, str(exc)[:200])]
+    results = [("token", "Token", True, "issued")]
+
     if serial:
         try:
             cov = client.coverage([serial]).get(serial.upper())
             detail = (f"{serial}: {'covered until ' + str(cov.get('contract_end')) if cov.get('covered') else 'not covered'}"
                       if cov else f"{serial}: no record (serial not linked to your contracts?)")
-            results.append(("Serial Number to Info", True, detail))
+            results.append(("sn2info", API_NAMES["sn2info"], True, detail))
         except Exception as exc:  # noqa: BLE001
-            results.append(("Serial Number to Info", False, str(exc)[:200]))
+            results.append(("sn2info", API_NAMES["sn2info"], False, str(exc)[:200]))
     else:
-        results.append(("Serial Number to Info", None, "skipped: no serial numbers in the inventory yet"))
+        results.append(("sn2info", API_NAMES["sn2info"], None, "skipped: no serial numbers in the inventory yet"))
+
+    sw_pid = pid or PROBE_SOFTWARE_PID
+    try:
+        rels = suggested_releases(client.software([sw_pid]).get(sw_pid.upper()))
+        results.append(("software", API_NAMES["software"], True,
+                        f"{sw_pid}: suggested {', '.join(rels[:3])}" if rels else f"{sw_pid}: no suggestion returned"))
+    except Exception as exc:  # noqa: BLE001
+        results.append(("software", API_NAMES["software"], False, str(exc)[:200]))
+
+    try:
+        rec = client.eox_by_pid([PROBE_PID]).get(PROBE_PID)
+        results.append(("eox", API_NAMES["eox"], True,
+                        f"{PROBE_PID}: LDoS {rec['ldos']}" if rec and rec.get("ldos") else f"{PROBE_PID}: no record"))
+    except Exception as exc:  # noqa: BLE001
+        results.append(("eox", API_NAMES["eox"], False, str(exc)[:200]))
     return results
+
+
+def enabled_apis():
+    """APIs to use, from CISCO_APIS (comma-separated keys of API_NAMES)."""
+    load_dotenv(env_path())
+    raw = os.getenv("CISCO_APIS")
+    if raw is None:
+        return set(DEFAULT_APIS)
+    return {a.strip().lower() for a in raw.split(",") if a.strip().lower() in API_NAMES}
 
 
 def configured():
@@ -236,9 +344,9 @@ def get_client(client_id=None, client_secret=None):
 def load_cache(cache_dir):
     path = Path(cache_dir) / CACHE_FILE
     if not path.exists():
-        return {"eox_serial": {}, "eox_pid": {}, "coverage": {}}
+        return {"eox_serial": {}, "eox_pid": {}, "coverage": {}, "software": {}}
     data = json.loads(path.read_text())
-    for key in ("eox_serial", "eox_pid", "coverage"):
+    for key in ("eox_serial", "eox_pid", "coverage", "software"):
         data.setdefault(key, {})
     return data
 
@@ -257,12 +365,18 @@ def _stale(entry, now, ttl_days):
         fetched = datetime.fromisoformat(entry["fetched_at"])
     except (KeyError, TypeError, ValueError):
         return True
-    has_data = any(v not in (None, "") for k, v in entry.items() if k != "fetched_at")
-    return now - fetched > timedelta(days=ttl_days if has_data else MISS_TTL_DAYS)
+    return now - fetched > timedelta(days=ttl_days if has_data(entry) else MISS_TTL_DAYS)
 
 
-def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DAYS, log=None):
-    """Query Cisco for serials/PIDs that are missing or stale in the cache, then save it."""
+def has_data(entry):
+    """True if a cached result holds anything beyond its timestamp (False counts: "not covered")."""
+    return any(v is False or (v not in (None, "") and v != [] and v != {})
+               for k, v in (entry or {}).items() if k != "fetched_at")
+
+
+def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DAYS, log=None, apis=None):
+    """Query the enabled APIs for serials/PIDs that are missing or stale in the cache, then save it."""
+    apis = set(DEFAULT_APIS) if apis is None else set(apis)
     log = log or (lambda msg: None)
     cache = load_cache(cache_dir)
     now = datetime.now(timezone.utc)
@@ -285,18 +399,25 @@ def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DA
             log(f"[yellow]WARNING: Cisco {label} failed: {exc}[/yellow]")
             errors.append(f"{label}: {exc}")
             return
-        found = sum(1 for k in keys if results.get(k))
+        found = sum(1 for k in keys if has_data(results.get(k)))
         log(f"    {found} of {len(keys)} returned data.")
         for key in keys:  # record misses too; they are retried after MISS_TTL_DAYS
             cache[section][key] = {**results.get(key, {}), "fetched_at": stamp}
         save_cache(cache_dir, cache)
 
     serials = {k.strip().upper() for k in serials if k and k.strip()}
-    run("coverage", todo("coverage", serials), cisco_client.coverage, "contract coverage (Serial Number to Info)")
-    # Coverage returns the orderable PID (e.g. C9300-48P-E), which is what EoX knows the product as.
-    orderable = {(cache["coverage"].get(s) or {}).get("orderable_pid") for s in serials} - {None, ""}
-    run("eox_serial", todo("eox_serial", serials), cisco_client.eox_by_serial, "EoX by serial")
-    run("eox_pid", todo("eox_pid", set(pids) | orderable), cisco_client.eox_by_pid, "EoX by product ID")
+    log(f"  Cisco APIs enabled: {', '.join(API_NAMES[a] for a in API_NAMES if a in apis) or 'none'}")
+    if "sn2info" in apis:
+        run("coverage", todo("coverage", serials), cisco_client.coverage, "contract coverage (Serial Number to Info)")
+    # Coverage also returns the base PID (C9300-48P) and orderable PID (C9300-48P-E) for each serial.
+    coverage = [cache["coverage"].get(s) or {} for s in serials]
+    base = {c.get("base_pid") for c in coverage} - {None, ""}
+    orderable = {c.get("orderable_pid") for c in coverage} - {None, ""}
+    if "software" in apis:
+        run("software", todo("software", set(pids) | base), cisco_client.software, "software suggestions")
+    if "eox" in apis:
+        run("eox_serial", todo("eox_serial", serials), cisco_client.eox_by_serial, "EoX by serial")
+        run("eox_pid", todo("eox_pid", set(pids) | orderable), cisco_client.eox_by_pid, "EoX by product ID")
     if errors:
         raise CiscoApiError(" | ".join(errors))
     return cache

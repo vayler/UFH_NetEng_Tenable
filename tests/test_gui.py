@@ -258,3 +258,39 @@ def test_pull_dialog_stays_open_on_warnings(app, tmp_path):
     assert dialog.cancel_button.text() == "Close"
     dialog.cancel()  # Close keeps the pulled data
     assert dialog.result() == 1
+
+
+def test_software_suggestion_in_devices_tab(app, inventory_cache):
+    from tenable_net import cisco
+
+    cache = cisco.load_cache(inventory_cache)
+    cache["software"] = {"C9300-48P": {"releases": [{"release": "17.12.4", "suggested": True,
+                                                       "software_type": "IOS XE Software"}],
+                                        "fetched_at": "2026-10-30T00:00:00+00:00"}}
+    cisco.save_cache(inventory_cache, cache)
+    w = MainWindow(inventory_cache)
+    tab = w.devices_tab
+    assert "sw_status" in tab.devices_model.columns
+    tab.lifecycle_filter.setCurrentText("Software upgrade suggested")
+    assert tab.devices_proxy.rowCount() == 1  # core-sw-01 runs 17.09.04a < 17.12.4
+    assert tab.select_device("core-sw-01")
+    assert "17.12.4" in tab.header.text() and "Upgrade suggested" in tab.header.text()
+    w.close()
+
+
+def test_settings_cisco_api_choices(app, tmp_path, monkeypatch):
+    from tenable_net.gui.dialogs import SettingsDialog
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CISCO_APIS", raising=False)
+    dialog = SettingsDialog()
+    page = dialog.pages["Cisco"]
+    assert {k for k, cb in page.choice_checks.items() if cb.isChecked()} == {"sn2info", "software"}
+    # a Test connection result ticks what answered and unticks what was refused
+    page._ok({"html": "x", "apis": {"sn2info": True, "software": True, "eox": False}})
+    page.choice_checks["eox"].setChecked(True)
+    page._ok({"html": "x", "apis": {"eox": False}})
+    assert not page.choice_checks["eox"].isChecked()
+    page.choice_checks["software"].setChecked(False)
+    dialog.save()
+    assert "CISCO_APIS=sn2info" in (tmp_path / ".env").read_text()

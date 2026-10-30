@@ -89,6 +89,7 @@ def fit_columns(view, max_width=360, caps=None):
         source = source.sourceModel()
     columns = getattr(source, "columns", [])
     header = view.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.Interactive)  # clear a stretch left from a previous column set
     for i, col in enumerate(columns):
         if col == "severity":
             view.setItemDelegateForColumn(i, view._severity_delegate)

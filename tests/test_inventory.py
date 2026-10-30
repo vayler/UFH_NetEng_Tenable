@@ -226,16 +226,24 @@ class CountingCisco:
         self.calls.append(("eox_pid", pids))
         return {}
 
+    def software(self, pids):
+        self.calls.append(("software", sorted(pids)))
+        return {}
+
+
+ALL_APIS = {"sn2info", "software", "eox"}
+
 
 def test_cisco_refresh_uses_cache_ttl(tmp_path):
     fake = CountingCisco()
-    cisco.refresh(fake, ["s1", "S2"], ["PID1"], tmp_path)
+    apis = {"sn2info", "eox"}
+    cisco.refresh(fake, ["s1", "S2"], ["PID1"], tmp_path, apis=apis)
     assert ("coverage", ["S1", "S2"]) in fake.calls
     fake.calls.clear()
-    cisco.refresh(fake, ["S1", "S2", "S3"], ["PID1"], tmp_path)  # only the new serial is queried
+    cisco.refresh(fake, ["S1", "S2", "S3"], ["PID1"], tmp_path, apis=apis)  # only the new serial is queried
     assert fake.calls == [("coverage", ["S3"]), ("eox_serial", ["S3"])]
     fake.calls.clear()
-    cisco.refresh(fake, ["S1"], [], tmp_path, force=True)
+    cisco.refresh(fake, ["S1"], [], tmp_path, force=True, apis=apis)
     assert ("coverage", ["S1"]) in fake.calls
     assert cisco.load_cache(tmp_path)["coverage"]["S1"]["covered"] is True
 
@@ -356,7 +364,7 @@ def test_cisco_refresh_continues_after_one_api_fails(tmp_path):
     fake = PartlyEntitledCisco()
     logs = []
     with pytest.raises(cisco.CiscoApiError, match="EoX by serial"):
-        cisco.refresh(fake, ["S1"], ["C9300-48P"], tmp_path, log=logs.append)
+        cisco.refresh(fake, ["S1"], ["C9300-48P"], tmp_path, log=logs.append, apis={"sn2info", "eox"})
     cache = cisco.load_cache(tmp_path)
     assert cache["coverage"]["S1"]["covered"] is True          # saved despite the EoX failure
     assert ("eox_pid", ["C9300-48P", "C9300-48P-E"]) in fake.calls  # orderable PID from coverage looked up
@@ -387,19 +395,127 @@ def test_cisco_misses_retried_after_a_day(tmp_path):
 
 
 class DiagCisco(CountingCisco):
+    """Contract lookup not enabled, software suggestions work, EoX not enabled."""
+
     def token(self):
         return "t"
-
-    def eox_by_pid(self, pids):
-        return {cisco.PROBE_PID: {"ldos": "2021-10-31"}}
 
     def coverage(self, serials):
         raise cisco.CiscoApiError("HTTP 403 (this API isn't enabled for your Cisco API app / contract)")
 
+    def software(self, pids):
+        return {p.upper(): {"releases": [{"release": "17.9.5", "suggested": True, "software_type": "IOS XE Software"}]}
+                for p in pids}
+
+    def eox_by_pid(self, pids):
+        raise cisco.CiscoApiError("HTTP 403 (this API isn't enabled for your Cisco API app / contract)")
+
 
 def test_cisco_diagnose():
-    results = {name: (ok, detail) for name, ok, detail in cisco.diagnose(DiagCisco(), serial="S1")}
-    assert results["Token"][0] and results["EoX"][0] and "2021-10-31" in results["EoX"][1]
-    assert results["Serial Number to Info"][0] is False and "403" in results["Serial Number to Info"][1]
-    skipped = {name: ok for name, ok, _ in cisco.diagnose(DiagCisco())}
-    assert skipped["Serial Number to Info"] is None
+    results = {key: (ok, detail) for key, _name, ok, detail in cisco.diagnose(DiagCisco(), serial="S1", pid="C9300-24T")}
+    assert results["token"][0]
+    assert results["sn2info"][0] is False and "403" in results["sn2info"][1]
+    assert results["software"][0] and "C9300-24T: suggested 17.9.5" in results["software"][1]
+    assert results["eox"][0] is False
+    skipped = {key: ok for key, _n, ok, _d in cisco.diagnose(DiagCisco())}
+    assert skipped["sn2info"] is None
+
+
+# ---- Software Suggestion v2 + API selection ----------------------------------------------
+
+SOFTWARE_PAYLOAD = {
+    "paginationResponseRecord": {"pageIndex": 1, "lastIndex": 1},
+    "productList": [
+        {"id": "1", "product": {"basePID": "C9300-48P", "productName": "Catalyst 9300 48-port PoE+",
+                                "softwareType": "IOS XE Software"},
+         "suggestions": [
+             {"isSuggested": "Y", "releaseFormat1": "17.9.5", "releaseDate": "30-Mar-2024"},
+             {"isSuggested": "Y", "releaseFormat1": "17.12.4", "releaseDate": "12-Nov-2024"},
+             {"isSuggested": "N", "releaseFormat1": "17.14.1"},
+         ]},
+        {"id": "2", "product": {"basePID": "C9300-48P", "softwareType": "IOS XE ROMMON Software"},
+         "suggestions": [{"isSuggested": "Y", "releaseFormat1": "17.9.1r"}]},
+        {"id": "3", "product": {"basePID": "WS-C2960X-48FPD-L", "softwareType": "IOS Software"},
+         "suggestions": [{"isSuggested": "Y", "releaseFormat1": "15.2.7E10"},
+                         {"errorDetailsResponse": {"errorCode": "S3_X"}}]},
+    ],
+}
+
+
+def test_parse_software_and_suggested_releases():
+    out = cisco.parse_software(SOFTWARE_PAYLOAD, ["C9300-48P-E", "WS-C2960X-48FPD-L"])
+    assert cisco.suggested_releases(out["C9300-48P"]) == ["17.9.5", "17.12.4"]  # ROMMON + non-suggested left out
+    assert out["C9300-48P-E"] is out["C9300-48P"]  # orderable PID mapped to its base PID
+    assert cisco.suggested_releases(out["WS-C2960X-48FPD-L"]) == ["15.2.7E10"]
+    with pytest.raises(cisco.CiscoApiError, match="S3_INV_BASEPID"):
+        cisco.parse_software({"errorResponse": {"errorCode": "S3_INV_BASEPID"}})
+
+
+@pytest.mark.parametrize("running,suggested,expected", [
+    ("17.09.04a", ["17.9.5", "17.12.4"], "Upgrade suggested"),
+    ("17.9.5", ["17.9.5", "17.12.4"], "On suggested release"),
+    ("17.09.05", ["17.9.5"], "On suggested release"),
+    ("17.15.1", ["17.9.5", "17.12.4"], "Newer than suggested"),
+    ("15.2(7)E8", ["15.2.7E10"], "Upgrade suggested"),
+    ("15.2(7)E10", ["15.2.7E10"], "On suggested release"),
+    ("", ["17.9.5"], "Suggestion available"),
+    ("17.9.5", [], "No suggestion"),
+])
+def test_software_status(running, suggested, expected):
+    assert inventory.software_status(running, suggested) == expected
+
+
+def test_software_batch_retried_per_pid():
+    bad = FakeResponse(200, {"errorResponse": {"errorCode": "S3_INV_BASEPID"}})
+    good = FakeResponse(200, {"productList": [{"product": {"basePID": "C9300-48P"},
+                                                "suggestions": [{"isSuggested": "Y", "releaseFormat1": "17.9.5"}]}]})
+    session = FakeSession([bad, good, FakeResponse(200, {"errorResponse": {"errorCode": "S3_NO_REC_FOUND"}})])
+    out = cisco.CiscoClient("id", "secret", session=session).software(["C9300-48P", "BOGUS-PID"])
+    assert cisco.suggested_releases(out["C9300-48P"]) == ["17.9.5"] and "BOGUS-PID" not in out
+    assert "/releases/productIds/C9300-48P,BOGUS-PID" in session.get_urls[0]
+
+
+def test_refresh_software_uses_models_and_base_pids(tmp_path):
+    class Fake(CountingCisco):
+        def coverage(self, serials):
+            self.calls.append(("coverage", serials))
+            return {s: {"covered": True, "base_pid": "C9300-48P", "orderable_pid": "C9300-48P-E"} for s in serials}
+
+    fake = Fake()
+    cisco.refresh(fake, ["S1"], ["WS-C2960X-48FPD-L"], tmp_path)  # default APIs: sn2info + software
+    assert ("software", ["C9300-48P", "WS-C2960X-48FPD-L"]) in fake.calls
+    assert not any(call[0].startswith("eox") for call in fake.calls)
+
+
+def test_enabled_apis(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CISCO_APIS", raising=False)
+    assert cisco.enabled_apis() == {"sn2info", "software"}
+    monkeypatch.setenv("CISCO_APIS", "sn2info, EoX, bogus")
+    assert cisco.enabled_apis() == {"sn2info", "eox"}
+    monkeypatch.setenv("CISCO_APIS", "")
+    assert cisco.enabled_apis() == set()
+
+
+def test_enrich_software_and_contract_fields():
+    inv = pd.DataFrame([
+        {"hostname": "h", "in_tenable": True, "akips_device": "h", "ip": "1", "vendor": "Cisco", "member": 1,
+         "model": "C9300-48P", "serial": "S1", "sw_version": "17.09.04a", "source": "AKiPS"},
+        {"hostname": "h2", "in_tenable": True, "akips_device": "h2", "ip": "2", "vendor": "Cisco", "member": 1,
+         "model": "C9300-48P", "serial": "", "sw_version": "17.9.5", "source": "AKiPS"},
+    ])
+    sw = cisco.parse_software(SOFTWARE_PAYLOAD, ["C9300-48P"])
+    cache = {"coverage": {"S1": {"covered": True, "contract_end": "2027-06-30", "contract_number": "12345",
+                                 "product_line_end": "2030-01-31", "base_pid": "C9300-48P"}},
+             "eox_serial": {}, "eox_pid": {}, "software": sw}
+    out = inventory.enrich(inv, cache, TODAY).set_index("hostname")
+    assert out.loc["h", "sw_status"] == "Upgrade suggested"
+    assert out.loc["h", "recommended_sw"] == "17.9.5, 17.12.4"
+    assert out.loc["h", "contract_number"] == "12345"
+    assert str(out.loc["h", "product_line_end"].date()) == "2030-01-31"
+    assert out.loc["h", "lifecycle"] == ""  # no EoX data -> blank, not "Unknown"
+    assert out.loc["h2", "sw_status"] == "On suggested release"
+    assert out.loc["h2", "contract"] == "No serial"
+    assert not inventory.has_lifecycle(out)
+    summary = inventory.device_summary(out.reset_index()).set_index("hostname")
+    assert summary.loc["h", "sw_status"] == "Upgrade suggested"

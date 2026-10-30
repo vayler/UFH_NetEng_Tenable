@@ -21,14 +21,16 @@ HEADERS = {
     "critical": "Crit", "high": "High", "medium": "Med", "low": "Low", "info": "Info",
     "total": "Total", "max_vpr": "Max VPR", "exploitable": "Exploitable", "findings": "Findings",
     "last_seen": "Last seen", "model": "Model", "lifecycle": "Lifecycle", "ldos": "LDoS",
-    "contract": "Contract", "contract_end": "Contract ends",
+    "contract": "Contract", "contract_end": "Contract ends", "sw_status": "Software",
+    "recommended_sw": "Cisco suggested", "sw_version": "Running",
 }
 # Text colors for hardware lifecycle / contract status cells (readable on light and dark backgrounds).
 STATUS_COLORS = {
     "Past LDoS": "#e53935", "LDoS < 12 mo": "#fb8c00", "End of sale": "#c49000",
     "Not covered": "#e53935", "Covered": "#43a047",
+    "Upgrade suggested": "#fb8c00", "On suggested release": "#43a047",
 }
-STATUS_COLUMNS = ("lifecycle", "contract")
+STATUS_COLUMNS = ("lifecycle", "contract", "sw_status")
 
 
 def _is_missing(value):

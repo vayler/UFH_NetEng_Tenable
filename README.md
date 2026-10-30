@@ -78,19 +78,27 @@ This is a native Qt (PySide6) app for Windows, macOS, and Linux. It reads the sa
 
 ![Devices](docs/screenshots/devices.png)
 
-## Hardware inventory & Cisco lifecycle (optional)
+## Hardware inventory & Cisco enrichment (optional)
 
-The tool can also show each device's **model and serial numbers** (one row per chassis or stack member), plus **Cisco end-of-life dates** and **contract coverage**, next to its vulnerabilities.
+The tool can also show each device's **model and serial numbers** (one row per chassis or stack member) next to its vulnerabilities. For Cisco gear it adds **contract coverage**, **Cisco's suggested software release** compared with what the device runs, and optionally **end-of-life dates**.
 
 | Source | Provides | Configure in `.env` (or **Settings…** in the app) |
 |---|---|---|
 | **AKiPS** (preferred) | Model + serial for every chassis/stack member from ENTITY-MIB, including devices Tenable doesn't know about | `AKIPS_URL`, `AKIPS_USER` (read-only, e.g. `api-ro`), `AKIPS_PASSWORD`, optional `AKIPS_CA_BUNDLE` |
 | **Tenable plugin output** (fallback) | Model + serial from credentialed-scan plugins 67217 (Cisco IOS XE Version) and 47864 (Cisco IOS Version) | nothing extra |
-| **Cisco Support APIs** | EoX: end of sale, end of SW maintenance, last date of support (LDoS), replacement PID. Serial Number to Info: contract covered / end date / service level | `CISCO_CLIENT_ID`, `CISCO_CLIENT_SECRET`, optional `CISCO_TOKEN_URL` / `CISCO_API_BASE` |
+| **Cisco Support APIs** | See the table below. Use whichever APIs your Cisco API app has. | `CISCO_CLIENT_ID`, `CISCO_CLIENT_SECRET`, `CISCO_APIS`, optional `CISCO_TOKEN_URL` / `CISCO_API_BASE` |
+
+| Cisco API (`CISCO_APIS` key) | Adds | Default |
+|---|---|---|
+| **Serial Number to Information** (`sn2info`) | Contract covered / not covered, contract end date, contract number, service level, warranty end, covered product-line end date, base and orderable product IDs. Needs serial numbers. | on |
+| **Software Suggestion v2** (`software`) | Cisco's suggested releases per model. Each device is marked *Upgrade suggested*, *On suggested release* or *Newer than suggested* by comparing them with the release it runs (`17.09.04a` and `17.9.4a` count as the same release). | on |
+| **EoX** (`eox`) | End of sale, end of software maintenance, last date of support (LDoS), replacement product ID. Lifecycle columns and filters only appear when this data exists. | off |
+
+Pick the APIs under **Settings → Cisco**. **Test connection** probes all three and ticks the ones your app can use, so you don't need to know in advance. In `.env`, set for example `CISCO_APIS=sn2info,software`.
 
 How it fits together:
 - AKiPS devices are matched to Tenable devices **by IP, then by hostname**. When both sources have a device, AKiPS wins and Tenable plugin output fills the gaps.
-- Only **Cisco** hardware is sent to Cisco's APIs. Lookups go by serial number, falling back to product ID.
+- Only **Cisco** hardware is sent to Cisco's APIs. A device counts as Cisco by its sysDescr, its Tenable OS, or a Cisco-shaped model number. Contract lookups go by serial number. Software suggestions go by model, plus the base product ID that the contract lookup returns.
 - Cisco results are cached in `cache/cisco.json` for 7 days, so re-running is cheap. Use `--force` to re-query.
 - Each source is optional. Without AKiPS you get Tenable-derived models/serials. Without Cisco credentials you get models and serials but no lifecycle or contract data.
 
@@ -99,18 +107,20 @@ python -m tenable_net inventory                 # AKiPS + Tenable inventory, the
 python -m tenable_net inventory --skip-akips    # Tenable plugin output only
 python -m tenable_net hardware                  # lifecycle / contract summary from cache
 python -m tenable_net cisco-refresh --force     # re-query Cisco, ignoring the 7-day cache
-python -m tenable_net cisco-test                # check token, EoX and Serial Number to Info access
+python -m tenable_net cisco-test                # check the token and each Cisco API
 python -m tenable_net pull --with-inventory     # vuln pull + inventory in one go
 ```
 
-In the app, the Pull dialog has **Hardware inventory** and **Cisco lifecycle + contract** options. The Devices tab gains Model / Lifecycle / Contract columns, a per-member hardware table with an EoL bulletin link and suggested replacement, and filters:
-- **Past last day of support**
-- **LDoS within 12 months**
-- **Not under contract**
-- **Contract ends within 90 days**
-- **In AKiPS but not in Tenable** (devices your scans are missing)
-
-The Overview shows a "Past LDoS / not covered" card, and the Excel report gets a **Hardware & Lifecycle** sheet plus model/lifecycle/contract columns on **By Device**.
+In the app:
+- **Pull dialog:** has **Hardware inventory** and **Cisco enrichment** options.
+- **Devices tab:** gains Model / Contract / Software columns (plus Lifecycle with EoX). Each device has a per-member table showing serial, running vs. Cisco-suggested release, contract status, end date and contract number. It also has these filters:
+  - **Not under contract**
+  - **Contract ends within 90 days**
+  - **Software upgrade suggested**
+  - **In AKiPS but not in Tenable** (devices your scans are missing)
+  - **Past last day of support** / **LDoS within 12 months** (with EoX)
+- **Overview:** shows a "Not covered / SW upgrade" card.
+- **Excel report:** gets a **Hardware & Lifecycle** sheet, plus contract/software columns on **By Device**.
 
 ![Devices with hardware lifecycle](docs/screenshots/devices-hardware.png)
 
@@ -121,11 +131,12 @@ Start with **Settings → Cisco → Test connection**, or `python -m tenable_net
 | Check | What a failure means |
 |---|---|
 | **Token** | Wrong client ID/secret, or a blocked token URL (`CISCO_TOKEN_URL`). |
-| **EoX** | Tested with a known end-of-life PID, plus a model from your inventory. `HTTP 403` means the EoX API isn't enabled for your Cisco API app. Request it in the Cisco API Console. |
-| **Serial Number to Info** | Contract lookup, tested with a serial from your inventory. `HTTP 403` means that API isn't enabled. "No record" means the serial isn't linked to your contracts or Smart Account. "Skipped" means no serial numbers have been collected yet. |
+| **Serial Number to Info** | Tested with a serial from your inventory. `HTTP 403` means the API isn't enabled for your Cisco API app. "No record" means the serial isn't linked to your contracts or Smart Account. "Skipped" means no serial numbers have been collected yet. |
+| **Software Suggestion** | Tested with a model from your inventory. `HTTP 403` means the API isn't enabled. "No suggestion" is normal for some products. |
+| **EoX** | Tested with a known end-of-life product ID. `HTTP 403` means you don't have EoX. Leave it unticked. |
 
 Notes:
-- **Contract coverage needs serial numbers.** When AKiPS or Tenable supplies only models, you still get EoX dates by product ID, but not contract status.
+- **Contract coverage needs serial numbers.** Software suggestions only need the model.
 - **The pull log reports counts per source.** For example: chassis with a model / with a serial, how many are Cisco, how many serials and product IDs were sent, and how many came back with data. If a step fails, the Pull dialog stays open with the warning instead of closing.
 - **If AKiPS shows models but no serials:**
   1. Run `python -m tenable_net inventory --dump-samples`.

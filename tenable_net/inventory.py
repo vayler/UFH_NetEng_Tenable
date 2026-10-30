@@ -28,9 +28,13 @@ INVENTORY_COLUMNS = [
     "hostname", "in_tenable", "akips_device", "ip", "vendor", "member", "model", "serial", "sw_version", "source",
 ]
 CISCO_COLUMNS = [
-    "contract", "contract_end", "service_level", "orderable_pid", "lifecycle", "end_of_sale",
-    "end_of_sw_maint", "ldos", "migration_pid", "bulletin_url",
+    "contract", "contract_end", "contract_number", "service_level", "warranty_end", "product_line_end",
+    "orderable_pid", "recommended_sw", "sw_status", "lifecycle", "end_of_sale", "end_of_sw_maint", "ldos",
+    "migration_pid", "bulletin_url",
 ]
+SW_STATUS_RANK = ["Upgrade suggested", "Newer than suggested", "On suggested release", "Suggestion available",
+                  "No suggestion", ""]
+DATE_COLUMNS = ("contract_end", "warranty_end", "product_line_end", "end_of_sale", "end_of_sw_maint", "ldos")
 LIFECYCLE_RANK = ["Past LDoS", "LDoS < 12 mo", "End of sale", "EoX announced", "Current", "Unknown", ""]
 
 
@@ -257,6 +261,11 @@ def sample_cisco_keys(cache_dir):
     return serial, model
 
 
+def has_lifecycle(inv):
+    """True when any row has EoX lifecycle data (so lifecycle columns/filters are worth showing)."""
+    return inv is not None and not inv.empty and inv["lifecycle"].fillna("").ne("").any()
+
+
 def cisco_keys(inv):
     """(serials, product IDs) to look up, for Cisco hardware only."""
     cisco_rows = inv[inv["vendor"] == "Cisco"]
@@ -265,64 +274,97 @@ def cisco_keys(inv):
     return serials, pids
 
 
+def version_key(version):
+    """Comparable key for Cisco release strings: 17.09.04a == 17.9.4a, 15.2(7)E8 == 15.2.7E8."""
+    return [(0, int(t)) if t.isdigit() else (1, t.lower()) for t in re.findall(r"\d+|[A-Za-z]+", str(version or ""))]
+
+
+def software_status(running, suggested):
+    """Compare the running release with Cisco's suggested releases for the product."""
+    if not suggested:
+        return "No suggestion"
+    run_key = version_key(running)
+    if not run_key:
+        return "Suggestion available"
+    keys = [version_key(r) for r in suggested]
+    if run_key in keys:
+        return "On suggested release"
+    return "Upgrade suggested" if run_key < max(keys) else "Newer than suggested"
+
+
 def enrich(inv, cisco_cache, today=None):
-    """Add contract + lifecycle columns from the Cisco cache (no network)."""
+    """Add contract, software-suggestion and lifecycle columns from the Cisco cache (no network)."""
     inv = inv.copy()
     for col in CISCO_COLUMNS:
         inv[col] = None
     if inv.empty:
         return inv
     cov_cache, sn_cache, pid_cache = cisco_cache["coverage"], cisco_cache["eox_serial"], cisco_cache["eox_pid"]
+    sw_cache = cisco_cache.get("software", {})
     records = []
     for _, row in inv.iterrows():
         serial, model = str(row["serial"]).upper(), str(row["model"]).upper()
         if row["vendor"] != "Cisco":
-            records.append({c: None for c in CISCO_COLUMNS} | {"contract": "", "lifecycle": ""})
+            records.append({c: None for c in CISCO_COLUMNS} | {"contract": "", "lifecycle": "", "sw_status": ""})
             continue
-        cov = cov_cache.get(serial) if serial else None
-        orderable = str((cov or {}).get("orderable_pid") or "").upper()
-        candidates = [sn_cache.get(serial) if serial else None, pid_cache.get(orderable) if orderable else None,
-                      pid_cache.get(model) if model else None]
-        candidates = [c for c in candidates if c]
-        dated = [c for c in candidates if c.get("ldos") or c.get("end_of_sale")]
-        eox = dated[0] if dated else next((c for c in candidates if c.get("eox_status")), None)
-        if cov and cov.get("covered") is True:
+        cov = (cov_cache.get(serial) if serial else None) or {}
+        orderable = str(cov.get("orderable_pid") or "").upper()
+        base = str(cov.get("base_pid") or "").upper()
+
+        eox_candidates = [c for c in (sn_cache.get(serial) if serial else None,
+                                      pid_cache.get(orderable) if orderable else None,
+                                      pid_cache.get(model) if model else None) if c]
+        dated = [c for c in eox_candidates if c.get("ldos") or c.get("end_of_sale")]
+        eox = dated[0] if dated else next((c for c in eox_candidates if c.get("eox_status")), None)
+
+        sw_entry = next((sw_cache[k] for k in (model, base) if k and cisco.has_data(sw_cache.get(k))), None)
+        suggested = cisco.suggested_releases(sw_entry)
+        looked_up = any(k in sw_cache for k in (model, base) if k)
+
+        if cov.get("covered") is True:
             contract = "Covered"
-        elif cov and cov.get("covered") is False:
+        elif cov.get("covered") is False:
             contract = "Not covered"
         else:
-            contract = "Unknown"
-        eox = eox or {}
+            contract = "Unknown" if serial else "No serial"
         records.append({
             "contract": contract,
-            "contract_end": (cov or {}).get("contract_end"),
-            "service_level": (cov or {}).get("service_level"),
-            "orderable_pid": (cov or {}).get("orderable_pid"),
-            "lifecycle": lifecycle_status(eox, today),
-            "end_of_sale": eox.get("end_of_sale"),
-            "end_of_sw_maint": eox.get("end_of_sw_maint"),
-            "ldos": eox.get("ldos"),
-            "migration_pid": eox.get("migration_pid"),
-            "bulletin_url": eox.get("bulletin_url"),
+            "contract_end": cov.get("contract_end"),
+            "contract_number": cov.get("contract_number"),
+            "service_level": cov.get("service_level"),
+            "warranty_end": cov.get("warranty_end"),
+            "product_line_end": cov.get("product_line_end"),
+            "orderable_pid": cov.get("orderable_pid"),
+            "recommended_sw": ", ".join(suggested[:3]) or None,
+            "sw_status": software_status(row["sw_version"], suggested) if (suggested or looked_up) else "",
+            "lifecycle": lifecycle_status(eox, today) if eox else "",  # blank when EoX isn't in use
+            "end_of_sale": (eox or {}).get("end_of_sale"),
+            "end_of_sw_maint": (eox or {}).get("end_of_sw_maint"),
+            "ldos": (eox or {}).get("ldos"),
+            "migration_pid": (eox or {}).get("migration_pid"),
+            "bulletin_url": (eox or {}).get("bulletin_url"),
         })
     extra = pd.DataFrame(records, index=inv.index)
     for col in CISCO_COLUMNS:
         inv[col] = extra[col]
-    for col in ("contract_end", "end_of_sale", "end_of_sw_maint", "ldos"):
+    for col in DATE_COLUMNS:
         inv[col] = pd.to_datetime(inv[col], errors="coerce")
     return inv
 
 
 def device_summary(inv):
     """One row per hostname: models, serial count, worst lifecycle, earliest LDoS, contract status."""
-    cols = ["hostname", "model", "members", "serials", "lifecycle", "ldos", "end_of_sale", "contract",
-            "contract_end", "in_tenable"]
+    cols = ["hostname", "model", "members", "serials", "sw_version", "recommended_sw", "sw_status", "lifecycle",
+            "ldos", "end_of_sale", "contract", "contract_end", "in_tenable"]
     if inv is None or inv.empty:
         return pd.DataFrame(columns=cols)
 
-    def worst(values):
+    def worst(values, rank=LIFECYCLE_RANK):
         present = [v for v in values if isinstance(v, str)]
-        return min(present, key=lambda v: LIFECYCLE_RANK.index(v) if v in LIFECYCLE_RANK else 99) if present else ""
+        return min(present, key=lambda v: rank.index(v) if v in rank else 99) if present else ""
+
+    def joined(values):
+        return ", ".join(dict.fromkeys(v for v in values if isinstance(v, str) and v))
 
     def contract(values):
         values = [v for v in values if v]
@@ -337,6 +379,9 @@ def device_summary(inv):
         "model": grouped["model"].agg(lambda s: ", ".join(dict.fromkeys(m for m in s if m))),
         "members": grouped.size(),
         "serials": grouped["serial"].agg(lambda s: ", ".join(x for x in s if x)),
+        "sw_version": grouped["sw_version"].agg(joined),
+        "recommended_sw": grouped["recommended_sw"].agg(joined),
+        "sw_status": grouped["sw_status"].agg(lambda v: worst(v, SW_STATUS_RANK)),
         "lifecycle": grouped["lifecycle"].agg(worst),
         "ldos": grouped["ldos"].min(),
         "end_of_sale": grouped["end_of_sale"].min(),
@@ -471,7 +516,7 @@ def refresh_cisco(cache_dir, cisco_client, force=False, log=None):
         log("[yellow]WARNING: no hardware inventory cached yet; pull inventory first.[/yellow]")
     elif not serials and not pids:
         log("[yellow]WARNING: nothing to look up: no Cisco chassis with a model or serial number.[/yellow]")
-    cisco.refresh(cisco_client, serials, pids, cache_dir, force=force, log=log)
+    cisco.refresh(cisco_client, serials, pids, cache_dir, force=force, log=log, apis=cisco.enabled_apis())
     return len(serials), len(pids)
 
 

@@ -58,7 +58,7 @@ class PullDialog(QDialog):
         self.hardware = QCheckBox("Hardware inventory (AKiPS + Tenable plugin output)")
         self.hardware.setChecked(True)
         self.hardware.setToolTip("Model and serial per chassis/stack member. AKiPS is used when configured in Settings.")
-        self.lifecycle = QCheckBox("Cisco lifecycle + contract (EoX, Serial Number to Info)")
+        self.lifecycle = QCheckBox("Cisco enrichment (contract, software suggestions; APIs chosen in Settings)")
         self.lifecycle.setChecked(cisco.configured())
         if not cisco.configured():
             self.lifecycle.setToolTip("Add Cisco API credentials in Settings to enable.")
@@ -211,11 +211,14 @@ class PullDialog(QDialog):
 class _ServicePage(QWidget):
     """One tab of the settings dialog: a form of .env fields plus a Test button run off-thread."""
 
-    def __init__(self, fields, hint, test_fn, parent=None):
+    def __init__(self, fields, hint, test_fn, choices=None, parent=None):
+        """choices: optional (env_key, [(value, label)], defaults) rendered as checkboxes and saved as a
+        comma-separated list, e.g. CISCO_APIS=sn2info,software."""
         super().__init__(parent)
         self.fields = {}
         self.test_fn = test_fn
         self.worker = None
+        self.choice_key, self.choice_checks = None, {}
         form = QFormLayout()
         for key, label, secret in fields:
             edit = QLineEdit(os.getenv(key) or "")
@@ -227,6 +230,18 @@ class _ServicePage(QWidget):
         show.toggled.connect(self._toggle_echo)
         form.addRow(show)
         self._secret_keys = [k for k, _l, secret in fields if secret]
+        choice_box = None
+        if choices:
+            self.choice_key, options, defaults = choices
+            current = os.getenv(self.choice_key)
+            selected = set(defaults) if current is None else {c.strip() for c in current.split(",")}
+            choice_box = QGroupBox("APIs your Cisco API app has (Test connection ticks the ones that respond)")
+            box_layout = QVBoxLayout(choice_box)
+            for value, label in options:
+                cb = QCheckBox(label)
+                cb.setChecked(value in selected)
+                box_layout.addWidget(cb)
+                self.choice_checks[value] = cb
         note = QLabel(hint)
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(placeholder-text);")
@@ -239,6 +254,8 @@ class _ServicePage(QWidget):
         row.addWidget(self.result, 1)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        if choice_box is not None:
+            layout.addWidget(choice_box)
         layout.addWidget(note)
         layout.addLayout(row)
         layout.addStretch(1)
@@ -248,7 +265,10 @@ class _ServicePage(QWidget):
             self.fields[key].setEchoMode(QLineEdit.Normal if show else QLineEdit.Password)
 
     def values(self):
-        return {k: e.text().strip() for k, e in self.fields.items()}
+        values = {k: e.text().strip() for k, e in self.fields.items()}
+        if self.choice_key:
+            values[self.choice_key] = ",".join(v for v, cb in self.choice_checks.items() if cb.isChecked())
+        return values
 
     def test(self):
         values = self.values()
@@ -258,6 +278,12 @@ class _ServicePage(QWidget):
 
     def _ok(self, message):
         self.test_button.setEnabled(True)
+        if isinstance(message, dict):  # per-API report: {"html", "apis": {key: True/False}}
+            for key, ok in message.get("apis", {}).items():
+                if key in self.choice_checks:
+                    self.choice_checks[key].setChecked(ok)
+            self.result.setText(message["html"])
+            return
         self.result.setText(f"<span style='color:#2e7d32'>{html.escape(message)}</span>")
 
     def _fail(self, message):
@@ -279,19 +305,26 @@ def _test_akips(v):
 
 
 def _test_cisco(v, cache_dir=None):
-    """Token + each API. Uses a real serial / model from the cached inventory when there is one."""
+    """Token + every API. Uses a real serial / model from the cached inventory when there is one.
+
+    Returns a per-API report; the Settings page ticks the APIs that answered and unticks the ones
+    that were refused, so you don't have to know which APIs your Cisco API app includes."""
     c = cisco.get_client(v["CISCO_CLIENT_ID"], v["CISCO_CLIENT_SECRET"])
     serial = pid = None
     if cache_dir is not None:
         try:
             serial, pid = inventory.sample_cisco_keys(cache_dir)
-        except Exception:  # noqa: BLE001 - the probe still works without inventory
+        except Exception:  # noqa: BLE001 - the probes still work without inventory
             pass
     results = cisco.diagnose(c, serial=serial, pid=pid)
-    text = " · ".join(f"{'✔' if ok else ('–' if ok is None else '✘')} {name}: {detail}" for name, ok, detail in results)
-    if any(ok is False for _n, ok, _d in results):
-        raise RuntimeError(text)
-    return text
+    if results[0][2] is False:
+        raise RuntimeError(f"Token: {results[0][3]}")
+    lines = []
+    for _key, name, ok, detail in results:
+        color, mark = {True: ("#2e7d32", "✔"), False: ("#c62828", "✘"), None: ("gray", "–")}[ok]
+        lines.append(f"<span style='color:{color}'>{mark} <b>{html.escape(name)}</b>: {html.escape(detail)}</span>")
+    return {"html": "<br>".join(lines),
+            "apis": {key: ok for key, _n, ok, _d in results if key in cisco.API_NAMES and ok is not None}}
 
 
 class SettingsDialog(QDialog):
@@ -312,10 +345,14 @@ class SettingsDialog(QDialog):
                 "every chassis / stack member via ENTITY-MIB.", _test_akips),
             "Cisco": _ServicePage(
                 [("CISCO_CLIENT_ID", "Client ID", False), ("CISCO_CLIENT_SECRET", "Client secret", True)],
-                "Optional. Cisco Support API app credentials with EoX and Serial Number to Information access. "
-                "Override endpoints with CISCO_TOKEN_URL / CISCO_API_BASE in .env if needed. The test checks the "
-                "token, EoX and Serial Number to Info separately.",
-                lambda v: _test_cisco(v, cache_dir)),
+                "Optional. Cisco Support API app credentials (API Console, client-credentials grant). "
+                "Override endpoints with CISCO_TOKEN_URL / CISCO_API_BASE in .env if needed.",
+                lambda v: _test_cisco(v, cache_dir),
+                choices=("CISCO_APIS", [
+                    ("sn2info", "Serial Number to Information: contract coverage, contract number, base PID"),
+                    ("software", "Software Suggestion v2: Cisco-suggested releases vs. what devices run"),
+                    ("eox", "EoX: end-of-sale / last-date-of-support dates"),
+                ], cisco.DEFAULT_APIS)),
         }
         self.tabs = QTabWidget()
         for name, page in self.pages.items():
@@ -338,5 +375,5 @@ class SettingsDialog(QDialog):
         if any(tenable) and not all(tenable):
             QMessageBox.warning(self, "Settings", "Enter both Tenable keys, or neither.")
             return
-        client.save_env({k: v for k, v in values.items() if v})
+        client.save_env({k: v for k, v in values.items() if v or k == "CISCO_APIS"})
         self.accept()

@@ -125,11 +125,19 @@ def hardware(inv, top=20):
         f"[bold]{len(inv)}[/bold] chassis/stack members on [bold]{len(devices)}[/bold] devices "
         f"({int((~devices['in_tenable']).sum())} not in Tenable)\n"
     )
-    for col, title in (("lifecycle", "Lifecycle"), ("contract", "Contract")):
-        counts = devices[col].replace("", "n/a (non-Cisco)").value_counts().rename_axis(col).reset_index(name="devices")
+    from tenable_net.inventory import has_lifecycle
+
+    tables = [("contract", "Contract"), ("sw_status", "Software vs. Cisco suggestion")]
+    if has_lifecycle(inv):
+        tables.append(("lifecycle", "Lifecycle (EoX)"))
+    for col, title in tables:
+        counts = devices[col].replace("", "n/a").value_counts().rename_axis(col).reset_index(name="devices")
         print_frame(counts, title)
     attention = devices[devices["lifecycle"].isin(["Past LDoS", "LDoS < 12 mo"]) | (devices["contract"] == "Not covered")]
     print_frame(
-        attention.sort_values("ldos"), "Needs attention (past/near LDoS or not covered)",
-        ["hostname", "model", "members", "lifecycle", "ldos", "contract", "contract_end", "in_tenable"], top,
+        attention.sort_values("contract_end"), "Needs attention (not covered, or past/near last date of support)",
+        ["hostname", "model", "members", "contract", "contract_end", "lifecycle", "ldos", "in_tenable"], top,
     )
+    upgrades = devices[devices["sw_status"] == "Upgrade suggested"]
+    print_frame(upgrades, "Software upgrade suggested by Cisco",
+                ["hostname", "model", "sw_version", "recommended_sw"], top)

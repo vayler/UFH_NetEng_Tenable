@@ -12,11 +12,12 @@ from tenable_net import reports
 from tenable_net.gui.findings import FindingsPanel
 from tenable_net.gui.models import STATUS_COLORS, DataFrameModel, MaskFilterProxy, display
 from tenable_net.gui.widgets import SEVERITY_COLORS, fit_columns, make_table
-from tenable_net.inventory import device_summary
+from tenable_net.inventory import device_summary, has_lifecycle
 from tenable_net.normalize import vendor_of
 
 DEVICE_COLUMNS = ["hostname", "ip", "vendor", "critical", "high", "medium", "low", "max_vpr"]
-HARDWARE_DEVICE_COLUMNS = ["hostname", "model", "lifecycle", "contract", "critical", "high", "medium", "low"]
+# Hardware mode has more columns, so only critical/high counts are listed (the header shows all four).
+HARDWARE_DEVICE_COLUMNS = ["hostname", "model", "contract", "sw_status", "lifecycle", "critical", "high"]
 DEVICE_FINDING_COLUMNS = [
     "severity", "plugin_id", "plugin_name", "vpr", "cves", "exploit_available", "port", "state", "last_found",
 ]
@@ -28,6 +29,7 @@ LIFECYCLE_FILTERS = {
     "Not under contract": lambda d: d["contract"] == "Not covered",
     "Contract ends within 90 days": lambda d: d["contract_end"].notna()
     & (d["contract_end"] <= pd.Timestamp.now().normalize() + timedelta(days=90)),
+    "Software upgrade suggested": lambda d: d["sw_status"] == "Upgrade suggested",
     "In AKiPS but not in Tenable": lambda d: d["in_tenable"] == False,  # noqa: E712
     "No hardware data": lambda d: d["model"].fillna("") == "",
 }
@@ -55,7 +57,7 @@ def device_frame(findings, assets, inventory=None):
         devices = devices.merge(hw.drop(columns=["in_tenable"]), on="hostname", how="left")
     for col in SEVERITY_COLUMNS:
         devices[col] = devices[col].fillna(0).astype(int) if col in devices else 0
-    for col in ("model", "lifecycle", "contract"):
+    for col in ("model", "lifecycle", "contract", "sw_status", "recommended_sw"):
         devices[col] = devices[col].fillna("") if col in devices else ""
     for col in ("ldos", "contract_end"):
         if col not in devices:
@@ -124,9 +126,14 @@ class DevicesTab(QWidget):
         if not has_hw:
             self.lifecycle_filter.setCurrentIndex(0)
         devices = device_frame(findings, assets, self.inventory if has_hw else None)
-        self.devices_model.set_frame(devices, HARDWARE_DEVICE_COLUMNS if has_hw else DEVICE_COLUMNS)
+        columns = DEVICE_COLUMNS
+        if has_hw:  # lifecycle only when EoX data exists
+            columns = [c for c in HARDWARE_DEVICE_COLUMNS if c != "lifecycle" or has_lifecycle(self.inventory)]
+        self.devices_model.set_frame(devices, columns)
         self.devices_view.sortByColumn(self.devices_model.column_index("critical"), Qt.DescendingOrder)
-        fit_columns(self.devices_view, max_width=180)
+        self.devices_view._stretch_column = None if has_hw else "hostname"
+        self.devices_view.horizontalHeader().setStretchLastSection(has_hw)
+        fit_columns(self.devices_view, max_width=200, caps={"model": 150})
         self._filter_devices()
 
     def _filter_devices(self):
@@ -215,18 +222,34 @@ class DevicesTab(QWidget):
             return f"<b style='color:{color}'>{html.escape(value)}</b>" if color else html.escape(value or "—")
 
         cells = "padding:1px 10px 1px 0; white-space:nowrap"
-        head = "".join(f"<th align='left' style='{cells}'>{h}</th>" for h in (
-            "#", "Model", "Serial", "Software", "Lifecycle", "End of sale", "LDoS", "Contract", "Ends", "Source"))
-        body = []
-        for _, r in hw.iterrows():
-            contract = colored(r["contract"])
-            body.append("<tr>" + "".join(f"<td style='{cells}'>{v}</td>" for v in (
-                html.escape(display("member", r["member"])), html.escape(text(r["model"]) or "—"),
-                html.escape(text(r["serial"]) or "—"), html.escape(text(r["sw_version"])), colored(r["lifecycle"]),
-                display("end_of_sale", r["end_of_sale"]), display("ldos", r["ldos"]), contract,
-                display("contract_end", r["contract_end"]), html.escape(text(r["source"])),
-            )) + "</tr>")
-        links = []
+        show_eox = has_lifecycle(hw)
+        columns = [
+            ("#", lambda r: html.escape(display("member", r["member"]))),
+            ("Model", lambda r: html.escape(text(r["model"]) or "—")),
+            ("Serial", lambda r: html.escape(text(r["serial"]) or "—")),
+            ("Running", lambda r: html.escape(text(r["sw_version"]))),
+            ("Cisco suggested", lambda r: html.escape(text(r["recommended_sw"]))),
+            ("Software", lambda r: colored(r["sw_status"])),
+            ("Contract", lambda r: colored(r["contract"])),
+            ("Ends", lambda r: display("contract_end", r["contract_end"])),
+            ("Contract #", lambda r: html.escape(text(r.get("contract_number")))),
+        ]
+        if show_eox:
+            columns += [("Lifecycle", lambda r: colored(r["lifecycle"])),
+                        ("LDoS", lambda r: display("ldos", r["ldos"]))]
+        columns.append(("Source", lambda r: html.escape(text(r["source"]))))
+        head = "".join(f"<th align='left' style='{cells}'>{name}</th>" for name, _fn in columns)
+        body = ["<tr>" + "".join(f"<td style='{cells}'>{fn(r)}</td>" for _name, fn in columns) + "</tr>"
+                for _, r in hw.iterrows()]
+        extra = []
+        service = next((text(v) for v in hw["service_level"] if text(v)), "")
+        if service:
+            extra.append(f"Service level: {html.escape(service)}")
+        line_end = next((display("product_line_end", v) for v in hw["product_line_end"]
+                         if display("product_line_end", v)), "")
+        if line_end:
+            extra.append(f"Covered product line ends: {line_end}")
+        links = extra
         bulletins = [text(u) for u in hw["bulletin_url"] if text(u)]
         migrations = [text(m) for m in hw["migration_pid"] if text(m)]
         if bulletins:

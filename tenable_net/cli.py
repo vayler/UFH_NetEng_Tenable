@@ -86,13 +86,18 @@ def cmd_hardware(args):
 def cmd_cisco_test(args):
     """Check the token and each Cisco API separately, using a real serial/model when cached."""
     serial, pid = inventory.sample_cisco_keys(args.cache_dir)
+    enabled = cisco.enabled_apis()
     failed = False
-    for name, ok, detail in cisco.diagnose(cisco.get_client(), serial=args.serial or serial, pid=args.pid or pid):
+    for key, name, ok, detail in cisco.diagnose(cisco.get_client(), serial=args.serial or serial, pid=args.pid or pid):
         mark = {True: "[green]OK[/green]  ", False: "[red]FAIL[/red]", None: "[dim]skip[/dim]"}[ok]
-        summaries.console.print(f"{mark} {name}: {detail}")
-        failed |= ok is False
+        note = "" if key == "token" or key in enabled else "  [dim](not enabled in CISCO_APIS)[/dim]"
+        summaries.console.print(f"{mark} {name}: {detail}{note}")
+        if ok is False and (key == "token" or key in enabled):
+            failed = True
+    summaries.console.print(f"\nEnabled APIs (CISCO_APIS): {', '.join(sorted(enabled)) or 'none'}")
     if failed:
-        raise RuntimeError("One or more Cisco API checks failed (see above).")
+        raise RuntimeError("An enabled Cisco API check failed (see above). Disable APIs your app "
+                           "doesn't have via CISCO_APIS or Settings -> Cisco.")
 
 
 def cmd_cisco_refresh(args):
@@ -159,9 +164,9 @@ def build_parser():
     p.add_argument("--top", type=int, default=20, help="rows per table")
     p.set_defaults(func=cmd_hardware)
 
-    p = sub.add_parser("cisco-test", help="check the Cisco token, EoX and Serial Number to Info access")
+    p = sub.add_parser("cisco-test", help="check the Cisco token and each Support API (contract, software, EoX)")
     p.add_argument("--serial", help="serial number to test contract lookup with (default: one from inventory)")
-    p.add_argument("--pid", help="extra product ID to test EoX with (default: one from inventory)")
+    p.add_argument("--pid", help="product ID to test software suggestions with (default: one from inventory)")
     p.set_defaults(func=cmd_cisco_test)
 
     p = sub.add_parser("cisco-refresh", help="re-query Cisco EoX + contract coverage for cached inventory")
