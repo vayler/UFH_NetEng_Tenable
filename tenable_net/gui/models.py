@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtGui import QColor
 
 from tenable_net.normalize import SEVERITY_ORDER
 
@@ -19,8 +20,15 @@ HEADERS = {
     "first_found": "First found", "last_found": "Last found", "devices": "Devices",
     "critical": "Crit", "high": "High", "medium": "Med", "low": "Low", "info": "Info",
     "total": "Total", "max_vpr": "Max VPR", "exploitable": "Exploitable", "findings": "Findings",
-    "last_seen": "Last seen",
+    "last_seen": "Last seen", "model": "Model", "lifecycle": "Lifecycle", "ldos": "LDoS",
+    "contract": "Contract", "contract_end": "Contract ends",
 }
+# Text colors for hardware lifecycle / contract status cells (readable on light and dark backgrounds).
+STATUS_COLORS = {
+    "Past LDoS": "#e53935", "LDoS < 12 mo": "#fb8c00", "End of sale": "#c49000",
+    "Not covered": "#e53935", "Covered": "#43a047",
+}
+STATUS_COLUMNS = ("lifecycle", "contract")
 
 
 def _is_missing(value):
@@ -114,7 +122,9 @@ class DataFrameModel(QAbstractTableModel):
             if self._numeric[column] and column not in ("plugin_id", "first_found", "last_found", "last_seen"):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return int(Qt.AlignLeft | Qt.AlignVCenter)
-        if role == Qt.ToolTipRole and column in ("plugin_name", "cves", "os"):
+        if role == Qt.ForegroundRole and column in STATUS_COLUMNS and value in STATUS_COLORS:
+            return QColor(STATUS_COLORS[value])
+        if role == Qt.ToolTipRole and column in ("plugin_name", "cves", "os", "model"):
             return display(column, value)
         return None
 

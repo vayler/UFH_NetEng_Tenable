@@ -1,11 +1,15 @@
 """Pull-from-Tenable and API-key settings dialogs."""
 
+import os
+import re
+
+from dotenv import load_dotenv
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from tenable_net import client, export
+from tenable_net import akips, cisco, client, export, inventory
 from tenable_net.gui.widgets import start_worker
 from tenable_net.normalize import SEVERITY_ORDER
 
@@ -13,8 +17,12 @@ from tenable_net.normalize import SEVERITY_ORDER
 class PullDialog(QDialog):
     """Choose export filters, run the export in the background, and report progress."""
 
-    def __init__(self, cache_dir, parent=None, client_factory=client.get_client):
+    def __init__(self, cache_dir, parent=None, client_factory=client.get_client,
+                 akips_factory=None, cisco_factory=None):
         super().__init__(parent)
+        # Factories return a client, or None when that source isn't configured.
+        self.akips_factory = akips_factory or (lambda: akips.get_client() if akips.configured() else None)
+        self.cisco_factory = cisco_factory or (lambda: cisco.get_client() if cisco.configured() else None)
         self.setWindowTitle("Pull from Tenable")
         self.setMinimumWidth(520)
         self.cache_dir = cache_dir
@@ -46,9 +54,19 @@ class PullDialog(QDialog):
         self.plugin_output = QCheckBox("Include plugin output (bigger, slower)")
         self.assets = QCheckBox("Also refresh the asset inventory")
         self.assets.setChecked(True)
+        self.hardware = QCheckBox("Hardware inventory (AKiPS + Tenable plugin output)")
+        self.hardware.setChecked(True)
+        self.hardware.setToolTip("Model and serial per chassis/stack member. AKiPS is used when configured in Settings.")
+        self.lifecycle = QCheckBox("Cisco lifecycle + contract (EoX, Serial Number to Info)")
+        self.lifecycle.setChecked(cisco.configured())
+        if not cisco.configured():
+            self.lifecycle.setToolTip("Add Cisco API credentials in Settings to enable.")
+        self.hardware.toggled.connect(lambda on: self.lifecycle.setEnabled(on))
         form.addRow("Last seen within", self.since)
         form.addRow(self.plugin_output)
         form.addRow(self.assets)
+        form.addRow(self.hardware)
+        form.addRow(self.lifecycle)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -82,6 +100,10 @@ class PullDialog(QDialog):
             skip_assets=not self.assets.isChecked(),
         )
 
+    def _controls(self):
+        return (self.start_button, *self.sev_checks.values(), *self.state_checks.values(), self.since,
+                self.plugin_output, self.assets, self.hardware, self.lifecycle)
+
     def start(self):
         opts = self.options()
         if not opts["severity"] or not opts["state"]:
@@ -95,17 +117,28 @@ class PullDialog(QDialog):
                 return
             tio = self.client_factory()
 
-        def job(worker):
-            return export.pull(
-                tio, cache_dir=self.cache_dir,
-                log=worker.log.emit,
-                progress=worker.progress.emit,
-                cancelled=lambda: worker.cancel_requested,
-                **opts,
-            )
+        akips_client = cisco_client = None
+        if self.hardware.isChecked():
+            try:
+                akips_client = self.akips_factory()
+                cisco_client = self.cisco_factory() if self.lifecycle.isChecked() else None
+            except client.MissingCredentials as exc:
+                self._log(f"WARNING: {exc}")
 
-        for w in (self.start_button, *self.sev_checks.values(), *self.state_checks.values(),
-                  self.since, self.plugin_output, self.assets):
+        def job(worker):
+            cancelled = lambda: worker.cancel_requested  # noqa: E731
+            meta = export.pull(
+                tio, cache_dir=self.cache_dir, log=worker.log.emit, progress=worker.progress.emit,
+                cancelled=cancelled, **opts,
+            )
+            if self.hardware.isChecked():
+                inventory.refresh_all(
+                    self.cache_dir, tio=tio, akips_client=akips_client, cisco_client=cisco_client,
+                    strict=False, log=worker.log.emit, progress=worker.progress.emit, cancelled=cancelled,
+                )
+            return meta
+
+        for w in self._controls():
             w.setEnabled(False)
         self.progress.setRange(0, 0)  # indeterminate: Tenable doesn't report a total up front
         self.status.setText("Requesting export from Tenable… (large exports can take several minutes)")
@@ -113,7 +146,7 @@ class PullDialog(QDialog):
                                    on_log=self._log, on_progress=self._progress)
 
     def _log(self, message):
-        self.log.appendPlainText(str(message))
+        self.log.appendPlainText(re.sub(r"\[/?[a-z ]+\]", "", str(message)))  # drop rich markup
 
     def _progress(self, stage, count):
         self.status.setText(f"Downloading {stage}: {count:,} records…")
@@ -134,9 +167,9 @@ class PullDialog(QDialog):
             return
         self.status.setText("Pull failed.")
         self._log(message)
-        for w in (self.start_button, *self.sev_checks.values(), *self.state_checks.values(),
-                  self.since, self.plugin_output, self.assets):
+        for w in self._controls():
             w.setEnabled(True)
+        self.lifecycle.setEnabled(self.hardware.isChecked())
         QMessageBox.critical(self, "Pull failed", message.split("\n\n")[0])
 
     def cancel(self):
@@ -155,81 +188,120 @@ class PullDialog(QDialog):
             super().closeEvent(event)
 
 
-class SettingsDialog(QDialog):
-    """Enter, test, and save the Tenable API keys to .env."""
+class _ServicePage(QWidget):
+    """One tab of the settings dialog: a form of .env fields plus a Test button run off-thread."""
 
-    def __init__(self, parent=None):
+    def __init__(self, fields, hint, test_fn, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Tenable API keys")
-        self.setMinimumWidth(560)
+        self.fields = {}
+        self.test_fn = test_fn
         self.worker = None
-        access, secret = client.saved_credentials()
-
-        self.access = QLineEdit(access or "", echoMode=QLineEdit.Password)
-        self.secret = QLineEdit(secret or "", echoMode=QLineEdit.Password)
-        show = QCheckBox("Show keys")
-        show.toggled.connect(self._toggle_echo)
-
         form = QFormLayout()
-        form.addRow("Access key", self.access)
-        form.addRow("Secret key", self.secret)
+        for key, label, secret in fields:
+            edit = QLineEdit(os.getenv(key) or "")
+            if secret:
+                edit.setEchoMode(QLineEdit.Password)
+            self.fields[key] = edit
+            form.addRow(label, edit)
+        show = QCheckBox("Show secrets")
+        show.toggled.connect(self._toggle_echo)
         form.addRow(show)
-        hint = QLabel(f"Generate keys in Tenable under <i>Settings → My Account → API Keys</i>.<br>"
-                      f"Saved to <code>{client.env_path()}</code>.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: palette(placeholder-text);")
-
+        self._secret_keys = [k for k, _l, secret in fields if secret]
+        note = QLabel(hint)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: palette(placeholder-text);")
         self.test_button = QPushButton("Test connection")
         self.test_button.clicked.connect(self.test)
         self.result = QLabel()
         self.result.setWordWrap(True)
-        test_row = QHBoxLayout()
-        test_row.addWidget(self.test_button)
-        test_row.addWidget(self.result, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
-
+        row = QHBoxLayout()
+        row.addWidget(self.test_button)
+        row.addWidget(self.result, 1)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(hint)
-        layout.addLayout(test_row)
-        layout.addWidget(buttons)
+        layout.addWidget(note)
+        layout.addLayout(row)
+        layout.addStretch(1)
 
     def _toggle_echo(self, show):
-        for field in (self.access, self.secret):
-            field.setEchoMode(QLineEdit.Normal if show else QLineEdit.Password)
+        for key in self._secret_keys:
+            self.fields[key].setEchoMode(QLineEdit.Normal if show else QLineEdit.Password)
 
-    def _keys(self):
-        return self.access.text().strip(), self.secret.text().strip()
+    def values(self):
+        return {k: e.text().strip() for k, e in self.fields.items()}
 
     def test(self):
-        access, secret = self._keys()
-        if not access or not secret:
-            self.result.setText("Enter both keys first.")
-            return
+        values = self.values()
         self.test_button.setEnabled(False)
         self.result.setText("Connecting…")
+        self.worker = start_worker(lambda _w: self.test_fn(values), self, on_done=self._ok, on_error=self._fail)
 
-        def job(_worker):
-            details = client.get_client(access, secret).session.details()
-            return details.get("username") or details.get("email") or "OK"
-
-        self.worker = start_worker(job, self, on_done=self._tested, on_error=self._test_failed)
-
-    def _tested(self, user):
+    def _ok(self, message):
         self.test_button.setEnabled(True)
-        self.result.setText(f"<span style='color:#2e7d32'>✔ Connected as {user}</span>")
+        self.result.setText(f"<span style='color:#2e7d32'>✔ {message}</span>")
 
-    def _test_failed(self, message):
+    def _fail(self, message):
         self.test_button.setEnabled(True)
         self.result.setText(f"<span style='color:#c62828'>✘ {message.splitlines()[0]}</span>")
 
+
+def _test_tenable(v):
+    details = client.get_client(v["TIO_ACCESS_KEY"], v["TIO_SECRET_KEY"]).session.details()
+    return f"Connected as {details.get('username') or details.get('email') or 'OK'}"
+
+
+def _test_akips(v):
+    c = akips.get_client(v["AKIPS_URL"], v["AKIPS_USER"] or "api-ro", v["AKIPS_PASSWORD"])
+    return f"Connected: {c.test():,} devices"
+
+
+def _test_cisco(v):
+    c = cisco.get_client(v["CISCO_CLIENT_ID"], v["CISCO_CLIENT_SECRET"])
+    c.token()
+    return "Token issued"
+
+
+class SettingsDialog(QDialog):
+    """Tenable, AKiPS and Cisco API credentials, each with a connection test. Saved to .env."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(600)
+        load_dotenv(client.env_path())
+        self.pages = {
+            "Tenable": _ServicePage(
+                [("TIO_ACCESS_KEY", "Access key", True), ("TIO_SECRET_KEY", "Secret key", True)],
+                "Generate keys in Tenable under <i>Settings → My Account → API Keys</i>.", _test_tenable),
+            "AKiPS": _ServicePage(
+                [("AKIPS_URL", "URL", False), ("AKIPS_USER", "API user", False), ("AKIPS_PASSWORD", "Password", True)],
+                "Optional. A read-only API user (e.g. <code>api-ro</code>). Supplies model and serial for "
+                "every chassis / stack member via ENTITY-MIB.", _test_akips),
+            "Cisco": _ServicePage(
+                [("CISCO_CLIENT_ID", "Client ID", False), ("CISCO_CLIENT_SECRET", "Client secret", True)],
+                "Optional. Cisco Support API app credentials with EoX and Serial Number to Information access. "
+                "Override endpoints with CISCO_TOKEN_URL / CISCO_API_BASE in .env if needed.", _test_cisco),
+        }
+        self.tabs = QTabWidget()
+        for name, page in self.pages.items():
+            self.tabs.addTab(page, name)
+        where = QLabel(f"Saved to <code>{client.env_path()}</code>")
+        where.setStyleSheet("color: palette(placeholder-text);")
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.tabs)
+        layout.addWidget(where)
+        layout.addWidget(buttons)
+
     def save(self):
-        access, secret = self._keys()
-        if not access or not secret:
-            QMessageBox.warning(self, "API keys", "Both keys are required.")
+        values = {}
+        for page in self.pages.values():
+            values.update(page.values())
+        tenable = (values["TIO_ACCESS_KEY"], values["TIO_SECRET_KEY"])
+        if any(tenable) and not all(tenable):
+            QMessageBox.warning(self, "Settings", "Enter both Tenable keys, or neither.")
             return
-        client.save_credentials(access, secret)
+        client.save_env({k: v for k, v in values.items() if v})
         self.accept()

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from tenable_net import __version__, export, normalize, reports
+from tenable_net import __version__, export, inventory, normalize, reports
 from tenable_net.gui.devices import DevicesTab
 from tenable_net.gui.dialogs import PullDialog, SettingsDialog
 from tenable_net.gui.findings import FindingsTab
@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("UFH NetEng", "tenable_net")
         self.findings = pd.DataFrame()
         self.assets = pd.DataFrame()
+        self.inventory = pd.DataFrame()
         self.meta = {}
         self.setWindowTitle("Tenable Network Vulnerabilities")
         self.resize(1400, 880)
@@ -99,7 +100,7 @@ class MainWindow(QMainWindow):
         self.report_action = QAction(icon(QStyle.SP_DialogSaveButton), "Export full report", self)
         self.report_action.setShortcut(QKeySequence("Ctrl+E"))
         self.report_action.triggered.connect(self.export_report)
-        self.settings_action = QAction(icon(QStyle.SP_FileDialogDetailedView), "API keys…", self)
+        self.settings_action = QAction(icon(QStyle.SP_FileDialogDetailedView), "Settings…", self)
         self.settings_action.triggered.connect(self.open_settings)
         find_action = QAction("Find", self)
         find_action.setShortcut(QKeySequence.Find)
@@ -142,7 +143,7 @@ class MainWindow(QMainWindow):
         pull = QPushButton("Pull from Tenable…")
         pull.setMinimumHeight(36)
         pull.clicked.connect(self.pull)
-        keys = QPushButton("Set API keys…")
+        keys = QPushButton("Settings…")
         keys.clicked.connect(self.open_settings)
         layout.addWidget(title)
         for b in (pull, keys):
@@ -155,7 +156,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("theme", theme)
         apply_theme(QApplication.instance(), theme)
         if not self.findings.empty:
-            self.overview.set_data(self.findings)  # charts pick up palette colors when built
+            self.overview.set_data(self.findings, self.inventory)  # charts pick up palette colors when built
 
     # ---- data ---------------------------------------------------------------
     def reload(self):
@@ -172,9 +173,10 @@ class MainWindow(QMainWindow):
             findings["vendor"] = findings["os"].map(normalize.vendor_of)
             self.findings = findings
             self.assets = normalize.assets_frame(assets)
-            self.overview.set_data(findings)
+            self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
+            self.overview.set_data(findings, self.inventory)
             self.findings_tab.set_data(findings)
-            self.devices_tab.set_data(findings, self.assets)
+            self.devices_tab.set_data(findings, self.assets, self.inventory)
         finally:
             QApplication.restoreOverrideCursor()
         self.stack.setCurrentIndex(1)
@@ -195,6 +197,7 @@ class MainWindow(QMainWindow):
             f"Data pulled {pulled} · {len(self.findings):,} findings · "
             f"{self.findings['hostname'].nunique() if not self.findings.empty else 0:,} devices · "
             f"severity: {sev} · state: {state}{since}"
+            + (f" · {len(self.inventory):,} chassis inventoried" if not self.inventory.empty else "")
         )
 
     def pull(self):
@@ -209,7 +212,8 @@ class MainWindow(QMainWindow):
     def export_report(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            paths = reports.write_reports(self.findings.drop(columns=["vendor"]), self.assets)
+            paths = reports.write_reports(self.findings.drop(columns=["vendor"]), self.assets,
+                                          inventory=self.inventory)
         finally:
             QApplication.restoreOverrideCursor()
         folder = paths[0].parent.resolve()

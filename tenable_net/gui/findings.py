@@ -41,7 +41,7 @@ class FindingsPanel(QSplitter):
         self.model.set_frame(df, self._columns)
         self.proxy.set_mask(None)
         self.table.sortByColumn(self.model.column_index("severity"), Qt.AscendingOrder)
-        fit_columns(self.table, max_width=200)
+        fit_columns(self.table, max_width=200, caps={"cves": 150})
         self.detail.clear_detail()
         if self.proxy.rowCount():
             self.table.selectRow(0)

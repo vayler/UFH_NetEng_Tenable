@@ -1,0 +1,42 @@
+{
+ "pagination_response_record": {
+  "page_index": 1,
+  "last_index": 1,
+  "page_records": 5,
+  "total_records": 5
+ },
+ "serial_numbers": [
+  {
+   "sr_no": "FOC2401X0AA",
+   "is_covered": "YES",
+   "coverage_end_date": "2027-06-30",
+   "service_line_descr": "SNTC 8X5XNBD",
+   "orderable_pid_list": [
+    {
+     "orderable_pid": "C9300-48P-E",
+     "item_type": "PRODUCT"
+    }
+   ]
+  },
+  {
+   "sr_no": "FOC2401X0BB",
+   "is_covered": "NO",
+   "coverage_end_date": "",
+   "orderable_pid_list": [
+    {
+     "orderable_pid": "C9300-48P-E"
+    }
+   ]
+  },
+  {
+   "sr_no": "FOC1950W0EE",
+   "is_covered": "YES",
+   "coverage_end_date": "2026-12-31",
+   "service_line_descr": "SNTC 8X5XNBD"
+  },
+  {
+   "sr_no": "FDO1234A5BC",
+   "is_covered": "NO"
+  }
+ ]
+}

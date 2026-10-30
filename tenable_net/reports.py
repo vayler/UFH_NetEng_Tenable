@@ -103,14 +103,32 @@ def excel_safe(df):
     return df
 
 
-def write_reports(findings, assets=None, out_dir=None, xlsx=True):
+HARDWARE_COLUMNS = [
+    "hostname", "in_tenable", "member", "model", "serial", "sw_version", "lifecycle", "end_of_sale",
+    "end_of_sw_maint", "ldos", "migration_pid", "contract", "contract_end", "service_level", "orderable_pid",
+    "source", "akips_device", "ip", "bulletin_url",
+]
+
+
+def by_device_with_hardware(findings, inventory=None):
+    """By Device rollup plus model / lifecycle / contract columns when inventory is available."""
+    devices = by_device(findings)
+    if inventory is None or inventory.empty or devices.empty:
+        return devices
+    from tenable_net.inventory import device_summary
+
+    hw = device_summary(inventory)[["hostname", "model", "lifecycle", "ldos", "contract", "contract_end"]]
+    return devices.merge(hw, on="hostname", how="left")
+
+
+def write_reports(findings, assets=None, out_dir=None, xlsx=True, inventory=None):
     """Write findings.csv and (optionally) a multi-sheet tenable_report.xlsx. Returns written paths."""
     out_dir = Path(out_dir or Path("output") / datetime.now().strftime("%Y-%m-%d_%H%M"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sheets = {
         "Severity Summary": severity_summary(findings),
-        "By Device": by_device(findings),
+        "By Device": by_device_with_hardware(findings, inventory),
         "By Plugin": by_plugin(findings),
         "By CVE": by_cve(findings),
         "By Vendor-OS": by_vendor_os(findings),
@@ -118,13 +136,17 @@ def write_reports(findings, assets=None, out_dir=None, xlsx=True):
     }
     if assets is not None and not assets.empty:
         sheets["Assets"] = assets
+    if inventory is not None and not inventory.empty:
+        sheets["Hardware & Lifecycle"] = inventory[[c for c in HARDWARE_COLUMNS if c in inventory]]
 
     written = []
     csv_path = out_dir / "findings.csv"
     findings.to_csv(csv_path, index=False)
     written.append(csv_path)
-    for name in ("By Device", "By Plugin", "By CVE"):
-        path = out_dir / f"{name.lower().replace(' ', '_')}.csv"
+    for name in ("By Device", "By Plugin", "By CVE", "Hardware & Lifecycle"):
+        if name not in sheets:
+            continue
+        path = out_dir / f"{name.lower().replace(' & ', '_').replace(' ', '_')}.csv"
         sheets[name].to_csv(path, index=False)
         written.append(path)
 

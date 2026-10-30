@@ -1,0 +1,56 @@
+{
+ "PaginationResponseRecord": {
+  "PageIndex": 1,
+  "LastIndex": 1,
+  "PageRecords": 3,
+  "TotalRecords": 3
+ },
+ "EOXRecord": [
+  {
+   "EOLProductID": "WS-C2960X-48FPD-L",
+   "ProductIDDescription": "Catalyst 2960-X 48 GigE PoE 740W",
+   "EndOfSaleDate": {
+    "value": "2022-10-30",
+    "dateFormat": "YYYY-MM-DD"
+   },
+   "EndOfSWMaintenanceReleases": {
+    "value": "2023-10-30",
+    "dateFormat": "YYYY-MM-DD"
+   },
+   "LastDateOfSupport": {
+    "value": "2027-10-31",
+    "dateFormat": "YYYY-MM-DD"
+   },
+   "LinkToProductBulletinURL": "https://www.cisco.com/c/en/us/products/eos-2960x.html",
+   "EOXMigrationDetails": {
+    "MigrationProductId": "C9200L-48P-4G-E"
+   },
+   "EOXInputValue": "FOC1950W0EE"
+  },
+  {
+   "EOLProductID": "WS-C3750X-48P-S",
+   "EndOfSaleDate": {
+    "value": "2016-10-30"
+   },
+   "LastDateOfSupport": {
+    "value": "2021-10-31"
+   },
+   "LinkToProductBulletinURL": "https://www.cisco.com/c/en/us/products/eos-3750x.html",
+   "EOXInputValue": "FDO1234A5BC,FDO1234A5BD"
+  },
+  {
+   "EOLProductID": "",
+   "EndOfSaleDate": {
+    "value": ""
+   },
+   "LastDateOfSupport": {
+    "value": ""
+   },
+   "EOXError": {
+    "ErrorID": "SSA_ERR_026",
+    "ErrorDescription": "EOX information does not exist for the following product ID(s): FOC2401X0AA"
+   },
+   "EOXInputValue": "FOC2401X0AA,FOC2401X0BB,FOC2333X1ZZ"
+  }
+ ]
+}

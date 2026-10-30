@@ -79,8 +79,11 @@ def make_table(model, stretch_column=None):
     return view
 
 
-def fit_columns(view, max_width=360):
-    """Size columns to content (sampled), apply the severity delegate and stretch column."""
+def fit_columns(view, max_width=360, caps=None):
+    """Size columns to content (sampled), apply the severity delegate and stretch column.
+
+    caps: optional {column: max width} overriding max_width for specific columns."""
+    caps = caps or {}
     source = view.model()
     while hasattr(source, "sourceModel"):
         source = source.sourceModel()
@@ -92,8 +95,8 @@ def fit_columns(view, max_width=360):
         view.resizeColumnToContents(i)
         if col == "severity":
             view.setColumnWidth(i, 88)
-        elif view.columnWidth(i) > max_width:
-            view.setColumnWidth(i, max_width)
+        elif view.columnWidth(i) > caps.get(col, max_width):
+            view.setColumnWidth(i, caps.get(col, max_width))
         if col == view._stretch_column:
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 

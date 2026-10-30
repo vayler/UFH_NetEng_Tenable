@@ -1,0 +1,44 @@
+[
+ {
+  "asset": {
+   "uuid": "uuid-core-sw-01",
+   "hostname": "core-sw-01",
+   "ipv4": "10.0.0.1"
+  },
+  "plugin": {
+   "id": 67217,
+   "name": "x"
+  },
+  "severity": "info",
+  "state": "OPEN",
+  "output": "\n  Source  : show version\n  Version : 17.9.4a\n  Model   : C9300-48P\n"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-core-sw-02",
+   "hostname": "core-sw-02",
+   "ipv4": "10.0.0.2"
+  },
+  "plugin": {
+   "id": 67217,
+   "name": "x"
+  },
+  "severity": "info",
+  "state": "OPEN",
+  "output": "\n  Source  : show version\n  Version : 17.6.1\n  Model   : C9300-24T\n  Serial Number : FOC2333X1ZZ\n"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-old-sw-07",
+   "hostname": "old-sw-07",
+   "ipv4": "10.0.3.7"
+  },
+  "plugin": {
+   "id": 47864,
+   "name": "x"
+  },
+  "severity": "info",
+  "state": "OPEN",
+  "output": "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.0(2)SE11\ncisco WS-C3750X-48P (PowerPC405) processor (revision W0) with 262144K bytes of memory.\nProcessor board ID FDO1234A5BC\nModel number                    : WS-C3750X-48P-S\nSystem serial number            : FDO1234A5BC\nModel number                    : WS-C3750X-48P-S\nSystem serial number            : FDO1234A5BD\n"
+ }
+]

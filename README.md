@@ -52,10 +52,48 @@ This is a native Qt (PySide6) app for Windows, macOS, and Linux. It reads the sa
 
 - **Pull from Tenable** (Ctrl+P) lets you choose severities, states, a last-seen window, plugin output, and whether to refresh the asset inventory. The export runs in the background with live record counts and can be cancelled. If you cancel or the pull fails, your previous cache is kept.
 - **Export full report** (Ctrl+E) writes the multi-sheet Excel report described below and opens the folder.
-- **API keys…** lets you enter your keys and use **Test connection** to check them before saving.
+- **Settings…** has a tab each for Tenable, AKiPS and Cisco credentials, each with **Test connection** to check them before saving.
 - **View → Theme** switches between System, Light, and Dark. Ctrl+F jumps to search and F5 reloads the cache.
 
 ![Devices](docs/screenshots/devices.png)
+
+## Hardware inventory & Cisco lifecycle (optional)
+
+The tool can also show each device's **model and serial numbers** (one row per chassis or stack member), plus **Cisco end-of-life dates** and **contract coverage**, next to its vulnerabilities.
+
+| Source | Provides | Configure in `.env` (or **Settings…** in the app) |
+|---|---|---|
+| **AKiPS** (preferred) | Model + serial for every chassis/stack member from ENTITY-MIB, including devices Tenable doesn't know about | `AKIPS_URL`, `AKIPS_USER` (read-only, e.g. `api-ro`), `AKIPS_PASSWORD`, optional `AKIPS_CA_BUNDLE` |
+| **Tenable plugin output** (fallback) | Model + serial from credentialed-scan plugins 67217 (Cisco IOS XE Version) and 47864 (Cisco IOS Version) | nothing extra |
+| **Cisco Support APIs** | EoX: end of sale, end of SW maintenance, last date of support (LDoS), replacement PID. Serial Number to Info: contract covered / end date / service level | `CISCO_CLIENT_ID`, `CISCO_CLIENT_SECRET`, optional `CISCO_TOKEN_URL` / `CISCO_API_BASE` |
+
+How it fits together:
+- AKiPS devices are matched to Tenable devices **by IP, then by hostname**. When both sources have a device, AKiPS wins and Tenable plugin output fills the gaps.
+- Only **Cisco** hardware is sent to Cisco's APIs. Lookups go by serial number, falling back to product ID.
+- Cisco results are cached in `cache/cisco.json` for 7 days, so re-running is cheap. Use `--force` to re-query.
+- Each source is optional. Without AKiPS you get Tenable-derived models/serials. Without Cisco credentials you get models and serials but no lifecycle or contract data.
+
+```bash
+python -m tenable_net inventory                 # AKiPS + Tenable inventory, then Cisco lookups
+python -m tenable_net inventory --skip-akips    # Tenable plugin output only
+python -m tenable_net hardware                  # lifecycle / contract summary from cache
+python -m tenable_net cisco-refresh --force     # re-query Cisco, ignoring the 7-day cache
+python -m tenable_net pull --with-inventory     # vuln pull + inventory in one go
+```
+
+In the app, the Pull dialog has **Hardware inventory** and **Cisco lifecycle + contract** options. The Devices tab gains Model / Lifecycle / Contract columns, a per-member hardware table with an EoL bulletin link and suggested replacement, and filters:
+- **Past last day of support**
+- **LDoS within 12 months**
+- **Not under contract**
+- **Contract ends within 90 days**
+- **In AKiPS but not in Tenable** (devices your scans are missing)
+
+The Overview shows a "Past LDoS / not covered" card, and the Excel report gets a **Hardware & Lifecycle** sheet plus model/lifecycle/contract columns on **By Device**.
+
+![Devices with hardware lifecycle](docs/screenshots/devices-hardware.png)
+
+> **First run: check the parsers against your data.** The AKiPS response format and the Tenable plugin output were written from documentation, not from your instances. Run
+> `python -m tenable_net inventory --dump-samples` and look at `cache/samples/`. If models or serials come out blank, share a scrubbed sample so the parsing can be adjusted.
 
 ## Command line
 
@@ -128,12 +166,15 @@ tenable_net/
   reports.py     rollups + CSV/XLSX writer
   summaries.py   rich terminal tables, device/search lookups
   cli.py         argparse entrypoint
+  akips.py       read-only AKiPS client; ENTITY-MIB chassis/stack-member parsing
+  inventory.py   Tenable inventory plugins, AKiPS↔Tenable matching, lifecycle/contract rollups
+  cisco.py       Cisco Support API client (EoX, Serial Number to Info) with 7-day cache
   gui/
     app.py       main window, theme, toolbar/menu actions
     overview.py  KPI cards, charts, top devices/plugins
     findings.py  filter sidebar, findings table + detail pane
     devices.py   device list and per-device drill-down
-    dialogs.py   pull-from-Tenable (background thread) and API-key dialogs
+    dialogs.py   pull dialog (background thread) and Tenable / AKiPS / Cisco settings
     models.py    DataFrame-backed Qt table models
     filters.py   pandas filtering behind the Findings tab
     widgets.py   severity pills, KPI cards, detail pane, worker thread

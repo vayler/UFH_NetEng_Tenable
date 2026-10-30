@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 from PySide6.QtCore import QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from tenable_net import export, normalize  # noqa: E402
+from tenable_net import export, inventory, normalize  # noqa: E402
 from tenable_net.gui.app import MainWindow  # noqa: E402
 from tenable_net.gui.dialogs import PullDialog  # noqa: E402
 from tenable_net.gui.filters import filter_mask  # noqa: E402
@@ -106,10 +106,16 @@ def test_empty_state(app, tmp_path):
 class FakeExports:
     def __init__(self, vulns, assets):
         self._vulns, self._assets = vulns, assets
-        self.vuln_kwargs = None
+        self.vuln_calls = []
+
+    @property
+    def vuln_kwargs(self):
+        return self.vuln_calls[0]
 
     def vulns(self, **kwargs):
-        self.vuln_kwargs = kwargs
+        self.vuln_calls.append(kwargs)
+        if kwargs.get("plugin_id"):  # hardware inventory export
+            return iter(json.loads((FIXTURES / "tenable_inventory_sample.json").read_text()))
         return iter(self._vulns)
 
     def assets(self, **kwargs):
@@ -126,7 +132,7 @@ class FakeTio:
 
 def test_pull_dialog_writes_cache(app, tmp_path):
     tio = FakeTio()
-    dialog = PullDialog(tmp_path, client_factory=lambda: tio)
+    dialog = PullDialog(tmp_path, client_factory=lambda: tio, akips_factory=lambda: None, cisco_factory=lambda: None)
     dialog.sev_checks["low"].setChecked(False)
     dialog.since.setValue(30)
     dialog.start()
@@ -137,6 +143,20 @@ def test_pull_dialog_writes_cache(app, tmp_path):
     assert "last_found" in tio.exports.vuln_kwargs
     vulns, assets, meta = export.load_cache(tmp_path)
     assert len(vulns) == 8 and meta["filters"]["since_days"] == 30
+    # hardware inventory ran as a second, plugin-filtered export
+    assert tio.exports.vuln_calls[1]["plugin_id"] == [67217, 47864]
+    assert set(inventory.load_inventory(tmp_path)["hostname"]) >= {"core-sw-02", "old-sw-07"}
+    dialog.worker.thread.wait(2000)
+
+
+def test_pull_dialog_hardware_off(app, tmp_path):
+    tio = FakeTio()
+    dialog = PullDialog(tmp_path, client_factory=lambda: tio, akips_factory=lambda: None, cisco_factory=lambda: None)
+    dialog.hardware.setChecked(False)
+    assert not dialog.lifecycle.isEnabled()
+    dialog.start()
+    wait_until(app, lambda: dialog.meta is not None)
+    assert len(tio.exports.vuln_calls) == 1
     dialog.worker.thread.wait(2000)
 
 
@@ -145,3 +165,55 @@ def test_export_cancel(app, tmp_path, monkeypatch):
     with pytest.raises(export.ExportCancelled):
         export.pull(FakeTio(), ["high"], ["open"], cache_dir=tmp_path, cancelled=lambda: True)
     assert not (tmp_path / export.VULNS_FILE).exists()
+
+
+# ---- hardware inventory in the GUI ------------------------------------------------
+
+@pytest.fixture
+def inventory_cache(cache_dir):
+    from tenable_net import akips, cisco
+
+    fx = lambda name: json.loads((FIXTURES / name).read_text())  # noqa: E731
+    inventory._write(cache_dir, inventory.AKIPS_FILE, akips.rows_from_raw(fx("akips_raw_sample.json")))
+    inventory._write(cache_dir, inventory.TENABLE_FILE,
+                     inventory.parse_tenable_inventory(fx("tenable_inventory_sample.json")))
+    stamp = "2026-10-30T00:00:00+00:00"
+    cisco.save_cache(cache_dir, {
+        "coverage": {k: {**v, "fetched_at": stamp} for k, v in cisco.parse_coverage(fx("cisco_coverage_sample.json")).items()},
+        "eox_serial": {k: {**v, "fetched_at": stamp} for k, v in cisco.parse_eox(fx("cisco_eox_sample.json")).items()},
+        "eox_pid": {},
+    })
+    return cache_dir
+
+
+def test_devices_tab_hardware(app, inventory_cache):
+    w = MainWindow(inventory_cache)
+    tab = w.devices_tab
+    assert "model" in tab.devices_model.columns and "lifecycle" in tab.devices_model.columns
+    assert tab.lifecycle_filter.isVisibleTo(tab)
+    # 5 Tenable devices + AKiPS-only lab-sw-01 + Tenable-inventory-only old-sw-07
+    assert tab.devices_proxy.rowCount() == 7
+
+    tab.lifecycle_filter.setCurrentText("Past last day of support")
+    assert tab.devices_proxy.rowCount() == 1
+    tab.lifecycle_filter.setCurrentText("Not under contract")
+    assert tab.devices_proxy.rowCount() == 2
+    tab.lifecycle_filter.setCurrentText("In AKiPS but not in Tenable")
+    assert tab.devices_proxy.rowCount() == 1
+    tab.lifecycle_filter.setCurrentText("All devices")
+
+    tab.search.setText("FOC2401X0BB")  # search by serial
+    assert tab.devices_proxy.rowCount() == 1
+    assert tab.select_device("core-sw-01")
+    header = tab.header.text()
+    assert "FOC2401X0AA" in header and "FOC2401X0BB" in header and "Not covered" in header
+    assert tab.select_device("lab-sw-01")
+    assert "Not in Tenable" in tab.header.text() and "EoL bulletin" in tab.header.text()
+
+    assert w.overview.cards["hardware"].isVisibleTo(w.overview)
+    w.close()
+
+
+def test_hardware_card_hidden_without_inventory(window):
+    assert not window.overview.cards["hardware"].isVisibleTo(window.overview)
+    assert not window.devices_tab.lifecycle_filter.isVisibleTo(window.devices_tab)

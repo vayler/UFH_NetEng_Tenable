@@ -4,7 +4,7 @@ import argparse
 import logging
 import sys
 
-from tenable_net import export, normalize, reports, summaries
+from tenable_net import akips, cisco, export, inventory, normalize, reports, summaries
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
 STATES = ["open", "reopened", "fixed"]
@@ -21,6 +21,32 @@ def _pull(args):
     )
     summaries.console.print(
         f"[green]Cached {meta['vuln_count']} findings and {meta['asset_count']} assets in {args.cache_dir}/[/green]"
+    )
+    if getattr(args, "with_inventory", False):
+        _refresh_inventory(args, tio=tio, strict=False)
+
+
+def _refresh_inventory(args, tio=None, strict=True):
+    """AKiPS + Tenable inventory, then Cisco lookups, for whichever sources are configured."""
+    from tenable_net.client import get_client
+
+    log = summaries.console.print
+    use_akips = not getattr(args, "skip_akips", False)
+    use_tenable = not getattr(args, "skip_tenable", False)
+    use_cisco = not getattr(args, "skip_cisco", False)
+    if use_akips and not akips.configured():
+        log("[yellow]AKiPS not configured (AKIPS_URL in .env); using Tenable plugin output only.[/yellow]")
+        use_akips = False
+    if use_cisco and not cisco.configured():
+        log("[yellow]Cisco API not configured (CISCO_CLIENT_ID/SECRET in .env); skipping lifecycle/contract.[/yellow]")
+        use_cisco = False
+    inventory.refresh_all(
+        args.cache_dir,
+        tio=(tio or get_client()) if use_tenable else None,
+        akips_client=akips.get_client() if use_akips else None,
+        cisco_client=cisco.get_client() if use_cisco else None,
+        force_cisco=getattr(args, "force", False),
+        strict=strict, log=log, samples=getattr(args, "dump_samples", 0),
     )
 
 
@@ -43,8 +69,23 @@ def cmd_summary(args):
 
 def cmd_report(args):
     findings, assets, _ = _load(args)
-    for path in reports.write_reports(findings, assets, out_dir=args.out, xlsx=not args.no_xlsx):
+    inv = inventory.load_inventory(args.cache_dir)
+    for path in reports.write_reports(findings, assets, out_dir=args.out, xlsx=not args.no_xlsx, inventory=inv):
         summaries.console.print(f"[green]wrote[/green] {path}")
+
+
+def cmd_inventory(args):
+    _refresh_inventory(args)
+    summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
+
+
+def cmd_hardware(args):
+    summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
+
+
+def cmd_cisco_refresh(args):
+    inventory.refresh_cisco(args.cache_dir, cisco.get_client(), force=args.force, log=summaries.console.print)
+    summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
 
 
 def cmd_device(args):
@@ -88,7 +129,28 @@ def build_parser():
 
     p = sub.add_parser("pull", parents=[pull_opts], help="export data from Tenable into the local cache")
     p.add_argument("--include-info", action="store_true", help="also export informational findings")
+    p.add_argument("--with-inventory", action="store_true",
+                   help="also refresh hardware inventory (AKiPS + Tenable) and Cisco lifecycle/contract")
     p.set_defaults(func=cmd_pull)
+
+    p = sub.add_parser("inventory", help="pull hardware inventory (AKiPS + Tenable) and Cisco lifecycle/contract")
+    p.add_argument("--skip-akips", action="store_true", help="don't query AKiPS")
+    p.add_argument("--skip-tenable", action="store_true", help="don't export Tenable inventory plugins")
+    p.add_argument("--skip-cisco", action="store_true", help="don't query the Cisco Support APIs")
+    p.add_argument("--force", action="store_true", help="re-query Cisco even if cached results are fresh")
+    p.add_argument("--dump-samples", type=int, nargs="?", const=3, default=0, metavar="N",
+                   help="write N raw records per source to cache/samples/ for checking (scrub before sharing)")
+    p.add_argument("--top", type=int, default=20, help="rows per table")
+    p.set_defaults(func=cmd_inventory)
+
+    p = sub.add_parser("hardware", help="show cached hardware lifecycle/contract summary")
+    p.add_argument("--top", type=int, default=20, help="rows per table")
+    p.set_defaults(func=cmd_hardware)
+
+    p = sub.add_parser("cisco-refresh", help="re-query Cisco EoX + contract coverage for cached inventory")
+    p.add_argument("--force", action="store_true", help="ignore the 7-day cache")
+    p.add_argument("--top", type=int, default=20, help="rows per table")
+    p.set_defaults(func=cmd_cisco_refresh)
 
     p = sub.add_parser("summary", parents=[pull_opts, read_opts], help="terminal overview")
     p.add_argument("--top", type=int, default=15, help="rows per table")

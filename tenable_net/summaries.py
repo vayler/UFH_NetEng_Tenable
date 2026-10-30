@@ -111,3 +111,25 @@ def search(findings, query):
         ["hostname", "ip", "os", "severity", "plugin_id", "plugin_name", "vpr", "port", "last_found"],
     )
     return hits
+
+
+def hardware(inv, top=20):
+    """Lifecycle / contract overview of the cached hardware inventory."""
+    if inv is None or inv.empty:
+        console.print("[yellow]No hardware inventory cached. Run `python -m tenable_net inventory` first.[/yellow]")
+        return
+    from tenable_net.inventory import device_summary
+
+    devices = device_summary(inv)
+    console.print(
+        f"[bold]{len(inv)}[/bold] chassis/stack members on [bold]{len(devices)}[/bold] devices "
+        f"({int((~devices['in_tenable']).sum())} not in Tenable)\n"
+    )
+    for col, title in (("lifecycle", "Lifecycle"), ("contract", "Contract")):
+        counts = devices[col].replace("", "n/a (non-Cisco)").value_counts().rename_axis(col).reset_index(name="devices")
+        print_frame(counts, title)
+    attention = devices[devices["lifecycle"].isin(["Past LDoS", "LDoS < 12 mo"]) | (devices["contract"] == "Not covered")]
+    print_frame(
+        attention.sort_values("ldos"), "Needs attention (past/near LDoS or not covered)",
+        ["hostname", "model", "members", "lifecycle", "ldos", "contract", "contract_end", "in_tenable"], top,
+    )

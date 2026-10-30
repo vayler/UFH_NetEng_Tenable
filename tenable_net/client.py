@@ -51,10 +51,14 @@ def saved_credentials():
     return os.getenv("TIO_ACCESS_KEY"), os.getenv("TIO_SECRET_KEY")
 
 
-def save_credentials(access_key, secret_key, path=None):
-    """Write the keys to .env and the current process environment."""
+def save_env(values, path=None):
+    """Write {KEY: value} to .env and the current process environment."""
     path = path or env_path()
     open(path, "a").close()  # set_key needs the file to exist
-    for key, value in (("TIO_ACCESS_KEY", access_key), ("TIO_SECRET_KEY", secret_key)):
+    for key, value in values.items():
         set_key(path, key, value, quote_mode="never")
         os.environ[key] = value
+
+
+def save_credentials(access_key, secret_key, path=None):
+    save_env({"TIO_ACCESS_KEY": access_key, "TIO_SECRET_KEY": secret_key}, path)

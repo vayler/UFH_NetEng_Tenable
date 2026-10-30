@@ -41,6 +41,7 @@ class OverviewTab(QWidget):
             "high": KpiCard("High", SEVERITY_COLORS["high"]),
             "exploitable": KpiCard("Exploit available", "#6a1b9a"),
             "max_vpr": KpiCard("Highest VPR", "#00838f"),
+            "hardware": KpiCard("Past LDoS / not covered", "#4e342e"),
         }
         cards_row = QHBoxLayout()
         for card in self.cards.values():
@@ -82,7 +83,8 @@ class OverviewTab(QWidget):
         QVBoxLayout(box).addWidget(widget)
         return box
 
-    def set_data(self, findings):
+    def set_data(self, findings, inventory=None):
+        self._set_hardware_card(inventory)
         sev = findings["severity"].astype(str)
         self.cards["findings"].set_value(len(findings))
         self.cards["devices"].set_value(findings["hostname"].nunique())
@@ -103,6 +105,21 @@ class OverviewTab(QWidget):
         plugins = reports.by_plugin(findings).head(10) if not findings.empty else pd.DataFrame()
         self.plugins_model.set_frame(plugins, ["severity", "devices", "max_vpr", "plugin_id", "plugin_name"])
         fit_columns(self.plugins_view, max_width=220)
+
+    def _set_hardware_card(self, inventory):
+        card = self.cards["hardware"]
+        if inventory is None or inventory.empty:
+            card.hide()
+            return
+        from tenable_net.inventory import device_summary
+
+        devices = device_summary(inventory)
+        past = int((devices["lifecycle"] == "Past LDoS").sum())
+        uncovered = int((devices["contract"] == "Not covered").sum())
+        card.set_value(f"{past:,} / {uncovered:,}")
+        card.setToolTip(f"{past} devices past Last Date of Support, {uncovered} with hardware not under "
+                        f"contract (of {len(devices)} inventoried). See the Devices tab filters.")
+        card.show()
 
     def _severity_chart(self, findings):
         counts = findings["severity"].astype(str).value_counts()
