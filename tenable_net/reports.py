@@ -90,7 +90,7 @@ def severity_summary(df):
     return pd.DataFrame({"severity": REPORT_SEVERITIES, "findings": counts.values, "devices": devices.values})
 
 
-def _excel_safe(df):
+def excel_safe(df):
     """Excel can't store tz-aware datetimes; also cap cell text at Excel's limit."""
     df = df.copy()
     for col in df.columns:
@@ -132,7 +132,7 @@ def write_reports(findings, assets=None, out_dir=None, xlsx=True):
         xlsx_path = out_dir / "tenable_report.xlsx"
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             for name, frame in sheets.items():
-                _excel_safe(frame).to_excel(writer, sheet_name=name, index=False)
+                excel_safe(frame).to_excel(writer, sheet_name=name, index=False)
                 ws = writer.sheets[name]
                 ws.freeze_panes = "A2"
                 if ws.max_row > 1:

@@ -3,6 +3,8 @@
 Export fields vary by plugin and asset type, so every lookup is defensive.
 """
 
+import re
+
 import pandas as pd
 
 SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
@@ -103,22 +105,30 @@ def assets_frame(assets):
     return df
 
 
+# Checked in order; each pattern is matched on word boundaries so e.g. "ios" doesn't hit "FortiOS".
+VENDOR_PATTERNS = [
+    (r"meraki", "Cisco Meraki"),
+    (r"fortios|fortinet|fortigate", "Fortinet"),
+    (r"cisco|ios(-| )?xe|ios(-| )?xr|ios|nx-os|asa", "Cisco"),
+    (r"junos|juniper", "Juniper"),
+    (r"pan-os|palo alto", "Palo Alto"),
+    (r"arista|eos", "Arista"),
+    (r"arubaos|aruba|aos-cx", "Aruba"),
+    (r"big-ip|f5", "F5"),
+    (r"check ?point|gaia", "Check Point"),
+    (r"procurve|comware|hpe", "HPE"),
+    (r"linux", "Linux"),
+    (r"windows", "Windows"),
+]
+_VENDOR_RES = [(re.compile(rf"\b(?:{pattern})\b"), vendor) for pattern, vendor in VENDOR_PATTERNS]
+
+
 def vendor_of(os_string):
     """Best-effort vendor bucket from an OS string, for network gear."""
     s = (os_string or "").lower()
-    for needle, vendor in (
-        ("meraki", "Cisco Meraki"),
-        ("cisco", "Cisco"), ("ios", "Cisco"), ("nx-os", "Cisco"),
-        ("junos", "Juniper"), ("juniper", "Juniper"),
-        ("pan-os", "Palo Alto"), ("palo alto", "Palo Alto"),
-        ("fortios", "Fortinet"), ("fortinet", "Fortinet"),
-        ("arista", "Arista"),
-        ("aruba", "Aruba"), ("arubaos", "Aruba"),
-        ("f5", "F5"), ("big-ip", "F5"),
-        ("checkpoint", "Check Point"), ("gaia", "Check Point"),
-        ("procurve", "HPE"), ("comware", "HPE"), ("hpe", "HPE"),
-        ("linux", "Linux"), ("windows", "Windows"),
-    ):
-        if needle in s:
+    if not s:
+        return "Unknown"
+    for regex, vendor in _VENDOR_RES:
+        if regex.search(s):
             return vendor
-    return "Unknown" if not s else "Other"
+    return "Other"

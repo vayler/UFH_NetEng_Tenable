@@ -15,14 +15,10 @@ def _pull(args):
 
     tio = get_client()
     severity = args.severity or (SEVERITIES if args.include_info else SEVERITIES[:-1])
-    filters = {"severity": severity, "state": args.state, "since_days": args.since}
-    summaries.console.print(f"Exporting vulnerabilities {filters} ...")
-    vulns = export.export_vulns(
-        tio, severity=severity, state=args.state, since_days=args.since, include_output=args.plugin_output,
+    meta = export.pull(
+        tio, severity, args.state, since_days=args.since, include_output=args.plugin_output,
+        skip_assets=args.skip_assets, cache_dir=args.cache_dir, log=summaries.console.print,
     )
-    summaries.console.print(f"  {len(vulns)} findings. Exporting assets ...")
-    assets = [] if args.skip_assets else export.export_assets(tio)
-    meta = export.save_cache(vulns, assets, filters, args.cache_dir)
     summaries.console.print(
         f"[green]Cached {meta['vuln_count']} findings and {meta['asset_count']} assets in {args.cache_dir}/[/green]"
     )
@@ -54,6 +50,14 @@ def cmd_report(args):
 def cmd_device(args):
     findings, _, _ = _load(args)
     summaries.device(findings, args.query)
+
+
+def cmd_gui(args):
+    try:
+        from tenable_net.gui.app import main as gui_main
+    except ImportError as exc:
+        raise RuntimeError(f"The GUI needs PySide6: pip install PySide6 ({exc})") from exc
+    gui_main(cache_dir=args.cache_dir)
 
 
 def cmd_search(args):
@@ -102,6 +106,9 @@ def build_parser():
     p = sub.add_parser("search", parents=[pull_opts, read_opts], help="devices affected by a CVE / plugin")
     p.add_argument("query", help="CVE ID, plugin ID, or text in the plugin name")
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("gui", help="open the desktop app")
+    p.set_defaults(func=cmd_gui)
 
     return parser
 

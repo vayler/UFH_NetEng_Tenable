@@ -52,6 +52,13 @@ def test_vendor_of():
     assert normalize.vendor_of("Cisco IOS XE 17.6.1") == "Cisco"
     assert normalize.vendor_of("Palo Alto Networks PAN-OS 10.2.3") == "Palo Alto"
     assert normalize.vendor_of("Juniper Junos OS 21.4R3") == "Juniper"
+    assert normalize.vendor_of("Fortinet FortiOS 7.0.12") == "Fortinet"
+    assert normalize.vendor_of("Arista EOS 4.28.3M") == "Arista"
+    assert normalize.vendor_of("Cisco NX-OS 9.3(8)") == "Cisco"
+    assert normalize.vendor_of("Aruba AOS-CX 10.10") == "Aruba"
+    assert normalize.vendor_of("Microsoft Windows Server 2022") == "Windows"
+    assert normalize.vendor_of("Ubuntu Linux 22.04") == "Linux"
+    assert normalize.vendor_of("Some Appliance") == "Other"
     assert normalize.vendor_of("") == "Unknown"
 
 

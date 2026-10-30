@@ -1,6 +1,8 @@
 # UFH NetEng Tenable
 
-A command-line tool for pulling network-equipment vulnerability data from **Tenable Vulnerability Management** (cloud.tenable.com) and turning it into CSV/Excel reports and terminal summaries. It's a faster alternative to the web dashboard.
+A desktop app and command-line tool for pulling network-equipment vulnerability data from **Tenable Vulnerability Management** (cloud.tenable.com), exploring it, and turning it into CSV/Excel reports. It's a faster alternative to the web dashboard.
+
+![Overview](docs/screenshots/overview.png)
 
 ## How it works
 
@@ -28,9 +30,34 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Put your keys in `.env` (Tenable: **Settings → My Account → API Keys**). `.env` is in `.gitignore`, so it won't be committed. You can also export `TIO_ACCESS_KEY` and `TIO_SECRET_KEY` as environment variables instead.
+Put your keys in `.env` (Tenable: **Settings → My Account → API Keys**). You can also enter them in the desktop app under **API keys…**, which writes the same file. `.env` is in `.gitignore`, so it won't be committed. You can also export `TIO_ACCESS_KEY` and `TIO_SECRET_KEY` as environment variables instead.
 
-## Usage
+Run commands from the project folder: the cache (`cache/`) and `.env` are found relative to the current directory.
+
+## Desktop app
+
+```bash
+python -m tenable_net gui
+```
+
+This is a native Qt (PySide6) app for Windows, macOS, and Linux. It reads the same `cache/` as the CLI, so data you pull in one is visible in the other.
+
+| Tab | What you can do |
+|---|---|
+| **Overview** | See KPI cards, a findings-by-severity chart, a severity-by-vendor chart, the most exposed devices, and the most widespread vulnerabilities. Click a severity bar to filter Findings to that severity. Double-click a device to open it. Double-click a vulnerability to list every device that has it. |
+| **Findings** | Filter live by severity, state, vendor, minimum VPR, exploit available, and free-text search (device, IP, plugin name/ID, CVE, OS; every word must match). Every column sorts. The detail pane shows the synopsis, solution, ports, and dates, with clickable CVE (NVD), Tenable plugin, and advisory links. **Export view…** saves exactly the rows on screen to Excel or CSV. |
+| **Devices** | Search the device list (worst first, including inventory devices with no findings). Pick a device to see its OS, tags, last seen, severity badges, and every finding with details. |
+
+![Findings, dark theme](docs/screenshots/findings-dark.png)
+
+- **Pull from Tenable** (Ctrl+P) lets you choose severities, states, a last-seen window, plugin output, and whether to refresh the asset inventory. The export runs in the background with live record counts and can be cancelled. If you cancel or the pull fails, your previous cache is kept.
+- **Export full report** (Ctrl+E) writes the multi-sheet Excel report described below and opens the folder.
+- **API keys…** lets you enter your keys and use **Test connection** to check them before saving.
+- **View → Theme** switches between System, Light, and Dark. Ctrl+F jumps to search and F5 reloads the cache.
+
+![Devices](docs/screenshots/devices.png)
+
+## Command line
 
 ```bash
 # 1. Pull open + reopened findings, low severity and above (the default)
@@ -83,7 +110,13 @@ pip install pytest
 python -m pytest -q
 ```
 
-The tests run against sample export records in `tests/fixtures/` and don't need API access.
+The tests run against sample export records in `tests/fixtures/` and don't need API access. The GUI tests run headless (`QT_QPA_PLATFORM=offscreen`) and are skipped if PySide6 isn't installed. On a bare Linux server, Qt also needs `libegl1`, `libgl1`, `libxkbcommon0`, and `libfontconfig1`.
+
+You can also install the project as a package. That puts `tenable-net` and `tenable-net-gui` on your PATH:
+
+```bash
+pip install -e ".[gui,dev]"
+```
 
 ## Layout
 
@@ -95,4 +128,13 @@ tenable_net/
   reports.py     rollups + CSV/XLSX writer
   summaries.py   rich terminal tables, device/search lookups
   cli.py         argparse entrypoint
+  gui/
+    app.py       main window, theme, toolbar/menu actions
+    overview.py  KPI cards, charts, top devices/plugins
+    findings.py  filter sidebar, findings table + detail pane
+    devices.py   device list and per-device drill-down
+    dialogs.py   pull-from-Tenable (background thread) and API-key dialogs
+    models.py    DataFrame-backed Qt table models
+    filters.py   pandas filtering behind the Findings tab
+    widgets.py   severity pills, KPI cards, detail pane, worker thread
 ```

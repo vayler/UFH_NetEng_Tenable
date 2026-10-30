@@ -14,7 +14,30 @@ ASSETS_FILE = "assets.json"
 META_FILE = "meta.json"
 
 
-def export_vulns(tio, severity=None, state=None, since_days=None, include_output=False):
+PROGRESS_EVERY = 500
+
+
+def _collect(iterator, progress=None, cancelled=None):
+    """Drain an export iterator, reporting progress and honoring cancellation."""
+    records = []
+    for rec in iterator:
+        records.append(rec)
+        if len(records) % PROGRESS_EVERY == 0:
+            if progress:
+                progress(len(records))
+            if cancelled and cancelled():
+                raise ExportCancelled()
+    if progress:
+        progress(len(records))
+    return records
+
+
+class ExportCancelled(Exception):
+    pass
+
+
+def export_vulns(tio, severity=None, state=None, since_days=None, include_output=False,
+                 progress=None, cancelled=None):
     """Export vulnerability findings. Returns a list of raw finding dicts."""
     kwargs = {"include_plugin_output": include_output}
     if severity:
@@ -24,12 +47,34 @@ def export_vulns(tio, severity=None, state=None, since_days=None, include_output
     if since_days:
         cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
         kwargs["last_found"] = int(cutoff.timestamp())
-    return list(tio.exports.vulns(**kwargs))
+    return _collect(tio.exports.vulns(**kwargs), progress, cancelled)
 
 
-def export_assets(tio):
+def export_assets(tio, progress=None, cancelled=None):
     """Export the asset inventory. Returns a list of raw asset dicts."""
-    return list(tio.exports.assets())
+    return _collect(tio.exports.assets(), progress, cancelled)
+
+
+def pull(tio, severity, state, since_days=None, include_output=False, skip_assets=False,
+         cache_dir=DEFAULT_CACHE_DIR, log=None, progress=None, cancelled=None):
+    """Run the vuln (and asset) exports and write them to the cache. Returns the cache meta.
+
+    log(msg) receives status lines; progress(stage, count) receives running record counts.
+    """
+    log = log or (lambda msg: None)
+    filters = {"severity": severity, "state": state, "since_days": since_days}
+    log(f"Exporting vulnerabilities {filters} ...")
+    vulns = export_vulns(
+        tio, severity=severity, state=state, since_days=since_days, include_output=include_output,
+        progress=progress and (lambda n: progress("vulns", n)), cancelled=cancelled,
+    )
+    log(f"  {len(vulns)} findings.")
+    assets = []
+    if not skip_assets:
+        log("Exporting assets ...")
+        assets = export_assets(tio, progress=progress and (lambda n: progress("assets", n)), cancelled=cancelled)
+        log(f"  {len(assets)} assets.")
+    return save_cache(vulns, assets, filters, cache_dir)
 
 
 def save_cache(vulns, assets, filters, cache_dir=DEFAULT_CACHE_DIR):
