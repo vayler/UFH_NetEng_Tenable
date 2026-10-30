@@ -31,6 +31,10 @@ TERMS = {
     "Serial": "Chassis serial number. Each stack member has its own.",
     "Stage": "Enrichment diagnostics: the first step where this device's hardware / Cisco data went missing.",
     "Matched by": "How the AKiPS device was matched to the Tenable device: alias file, IP, sysName or name.",
+    "Change": "New: not present at the previous pull. Reopened: was gone at the previous pull but seen earlier.",
+    "Fleet risk": "The average risk score of the riskiest quarter of devices, a single number for the network's "
+                  "overall exposure.",
+    "Time to fix": "Days from when Tenable first found a finding to the first pull where it was gone.",
 }
 
 # Table column -> glossary term (used for header tooltips).
@@ -42,7 +46,7 @@ COLUMNS = {
     "contract": "Contract", "contract_end": "Contract", "sw_status": "Software status",
     "recommended_sw": "Cisco suggested", "lifecycle": "Lifecycle", "ldos": "LDoS", "end_of_sale": "End of sale",
     "orderable_pid": "Orderable PID", "model": "Model", "serial": "Serial", "serials": "Serial", "stage": "Stage",
-    "match_method": "Matched by",
+    "match_method": "Matched by", "change": "Change",
 }
 
 

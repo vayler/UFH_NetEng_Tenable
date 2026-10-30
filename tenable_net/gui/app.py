@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QMainWindow, QMessageBox, QPushButton, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from tenable_net import __version__, akips, cisco, client, export, glossary, inventory, normalize, reports, risk
+from tenable_net import (
+    __version__, akips, cisco, client, export, glossary, history, inventory, normalize, reports, risk,
+)
 from tenable_net.gui import theme
 from tenable_net.gui.devices import DevicesTab
 from tenable_net.gui.dialogs import PullDialog, SettingsDialog
@@ -33,6 +35,7 @@ NAV = [
     ("overview", "Overview", "Overview", "Where the network stands right now"),
     ("findings", "Findings", "Findings", "Every vulnerability Tenable reports, with filters and details"),
     ("devices", "Devices", "Devices", "Risk, hardware and findings per device"),
+    ("trends", "Trends", "Trends", "How exposure is changing from pull to pull"),
     ("diagnostics", "Diagnostics", "Enrichment diagnostics", "Why devices are missing hardware or Cisco data"),
 ]
 NAV_INFO = {key: (title, subtitle) for key, _label, title, subtitle in NAV}
@@ -79,6 +82,8 @@ class MainWindow(QMainWindow):
         self.inventory = pd.DataFrame()
         self.meta = {}
         self.diagnostics_window = None
+        self.trends_view = None
+        self.changes, self.history_series = None, pd.DataFrame()
         self._cache_signature = None
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -385,6 +390,13 @@ class MainWindow(QMainWindow):
             page = self.diagnostics_window
         elif key == "diagnostics":
             self.diagnostics_window.reload()
+        elif key == "trends" and self.trends_view is None:
+            from tenable_net.gui.trends import TrendsView
+
+            self.trends_view = TrendsView(self.cache_dir)
+            self.trends_view.view_requested.connect(lambda view, filters: self.navigate(view, **filters))
+            self._replace_page(key, self.trends_view)
+            page = self.trends_view
         return page
 
     def _replace_page(self, key, widget):
@@ -402,9 +414,9 @@ class MainWindow(QMainWindow):
         diagnostics(stage=)."""
         page = self.show_view(view)
         if view == "findings" and (filters.get("text") is not None or filters.get("severity")
-                                   or filters.get("exploitable")):
+                                   or filters.get("exploitable") or filters.get("changed")):
             page.show_query(filters.get("text") or "", severity=filters.get("severity"),
-                            exploitable=filters.get("exploitable", False))
+                            exploitable=filters.get("exploitable", False), changed=filters.get("changed", False))
         elif view == "devices" and filters.get("hostname"):
             page.select_device(filters["hostname"])
         elif view == "devices" and filters.get("lifecycle"):
@@ -529,12 +541,23 @@ class MainWindow(QMainWindow):
             findings = normalize.findings_frame(vulns, include_info=True)
             findings["vendor"] = findings["os"].map(normalize.vendor_of)
             findings = risk.add_finding_scores(findings)
+            self.changes, self.history_series = self._load_history()
+            labels = {}
+            if self.changes:
+                labels.update({k: "New" for k in self.changes["new"]["key"]})
+                labels.update({k: "Reopened" for k in self.changes["reopened"]["key"]})
+            findings["change"] = [labels.get(history.finding_key(r), "") for r in
+                                  findings[["asset_uuid", "plugin_id", "port", "protocol"]].to_dict("records")]
             self.findings = findings
             self.assets = normalize.assets_frame(assets)
             self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
             self.overview.set_data(findings, self.inventory)
+            self.overview.set_history(self.changes, self.history_series)
             self.findings_tab.set_data(findings)
             self.devices_tab.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
+            self.devices_tab.history_dir = self.cache_dir
+            if self.trends_view is not None:
+                self.trends_view.reload()
             if self.diagnostics_window is not None:
                 self.diagnostics_window.reload()
             self._build_search_index()
@@ -545,6 +568,14 @@ class MainWindow(QMainWindow):
         self.report_button.setEnabled(True)
         self._update_status()
         self._update_header()
+
+    def _load_history(self):
+        """Make sure history exists (backfill on first run), then return (changes, series)."""
+        try:
+            history.ensure_backfill(self.cache_dir)
+            return history.changes(self.cache_dir), history.series(self.cache_dir)
+        except Exception:  # noqa: BLE001 - history is a bonus; never block loading
+            return None, pd.DataFrame()
 
     def _enrichment_status(self, vulns, assets):
         """{hostname: (stage, reason)} from the diagnostics report, for the Devices tab header."""
@@ -631,7 +662,8 @@ class MainWindow(QMainWindow):
     def export_report(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            paths = reports.write_reports(self.findings.drop(columns=["vendor", "risk", "days_open"], errors="ignore"),
+            paths = reports.write_reports(self.findings.drop(columns=["vendor", "risk", "days_open", "change"],
+                                                             errors="ignore"),
                                           self.assets,
                                           inventory=self.inventory)
         finally:

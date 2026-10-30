@@ -15,7 +15,7 @@ from tenable_net.gui.widgets import SEVERITY_COLORS, FindingDetail, dot_icon, fi
 from tenable_net.normalize import SEVERITY_ORDER
 
 FINDING_TABLE_COLUMNS = [
-    "risk", "severity", "hostname", "ip", "vendor", "plugin_id", "plugin_name", "vpr", "cves",
+    "risk", "change", "severity", "hostname", "ip", "vendor", "plugin_id", "plugin_name", "vpr", "cves",
     "exploit_available", "port", "state", "days_open", "last_found",
 ]
 
@@ -111,9 +111,12 @@ class FindingsTab(QWidget):
         self.min_vpr.valueChanged.connect(self._debounce.start)
         self.exploitable = QCheckBox("Exploit available only")
         self.exploitable.toggled.connect(self.apply_filters)
+        self.changed = QCheckBox("New or reopened since last pull")
+        self.changed.toggled.connect(self.apply_filters)
         form.addRow("Vendor", self.vendor)
         form.addRow("Min VPR", self.min_vpr)
         form.addRow(self.exploitable)
+        form.addRow(self.changed)
 
         reset = QPushButton("Reset filters")
         reset.clicked.connect(self.reset_filters)
@@ -159,6 +162,7 @@ class FindingsTab(QWidget):
             min_vpr=self.min_vpr.value(),
             exploitable_only=self.exploitable.isChecked(),
             text=self.search.text(),
+            changed_only=self.changed.isChecked(),
         )
 
     def apply_filters(self):
@@ -173,16 +177,17 @@ class FindingsTab(QWidget):
         self.count_changed.emit(shown, total)
 
     def reset_filters(self):
-        for w in (*self.sev_checks.values(), *self.state_checks.values(), self.exploitable,
+        for w in (*self.sev_checks.values(), *self.state_checks.values(), self.exploitable, self.changed,
                   self.vendor, self.min_vpr, self.search):
             w.blockSignals(True)
         for cb in (*self.sev_checks.values(), *self.state_checks.values()):
             cb.setChecked(True)
         self.exploitable.setChecked(False)
+        self.changed.setChecked(False)
         self.vendor.setCurrentIndex(0)
         self.min_vpr.setValue(0)
         self.search.clear()
-        for w in (*self.sev_checks.values(), *self.state_checks.values(), self.exploitable,
+        for w in (*self.sev_checks.values(), *self.state_checks.values(), self.exploitable, self.changed,
                   self.vendor, self.min_vpr, self.search):
             w.blockSignals(False)
         self.apply_filters()
@@ -195,6 +200,8 @@ class FindingsTab(QWidget):
                 cb.setChecked(sev == filters["severity"])
         if filters.get("exploitable"):
             self.exploitable.setChecked(True)
+        if filters.get("changed"):
+            self.changed.setChecked(True)
         self.search.setText(text)
         self.apply_filters()
 

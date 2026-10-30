@@ -74,7 +74,14 @@ def pull(tio, severity, state, since_days=None, include_output=False, skip_asset
         log("Exporting assets ...")
         assets = export_assets(tio, progress=progress and (lambda n: progress("assets", n)), cancelled=cancelled)
         log(f"  {len(assets)} assets.")
-    return save_cache(vulns, assets, filters, cache_dir)
+    meta = save_cache(vulns, assets, filters, cache_dir)
+    try:  # history powers "what changed" and trends; it must never fail a pull
+        from tenable_net import history
+
+        history.record(cache_dir)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  (history snapshot skipped: {exc})")
+    return meta
 
 
 def save_cache(vulns, assets, filters, cache_dir=DEFAULT_CACHE_DIR):

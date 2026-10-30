@@ -1,3 +1,3 @@
 """Pull and report on Tenable Vulnerability Management data for network equipment."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

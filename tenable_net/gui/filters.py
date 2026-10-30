@@ -5,7 +5,7 @@ import pandas as pd
 
 
 def filter_mask(df, severities=None, states=None, vendor=None, min_vpr=0.0,
-                exploitable_only=False, text=""):
+                exploitable_only=False, text="", changed_only=False):
     """Return a boolean numpy array selecting rows of the findings frame."""
     mask = pd.Series(True, index=df.index)
     if severities is not None:
@@ -18,6 +18,8 @@ def filter_mask(df, severities=None, states=None, vendor=None, min_vpr=0.0,
         mask &= df["vpr"].fillna(0) >= min_vpr
     if exploitable_only:
         mask &= df["exploit_available"] == True  # noqa: E712
+    if changed_only and "change" in df:
+        mask &= df["change"].fillna("") != ""
     for term in text.lower().split():
         term_mask = pd.Series(False, index=df.index)
         for col in ("hostname", "ip", "plugin_name", "cves", "os"):

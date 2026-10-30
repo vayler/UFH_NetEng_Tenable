@@ -125,3 +125,24 @@ def test_cache_change_reloads(window, tmp_path):
     export.save_cache(vulns[:2], [], {"severity": ["critical"]}, tmp_path)  # e.g. a CLI pull
     window._cache_changed()
     assert len(window.findings) == 2
+
+
+def test_history_in_the_ui(app, tmp_path, monkeypatch):
+    import pandas as pd
+
+    from tenable_net import history, normalize
+
+    monkeypatch.chdir(tmp_path)
+    vulns = json.loads((FIXTURES / "vulns_sample.json").read_text())
+    f = normalize.findings_frame(vulns)
+    history.save(tmp_path, history.build_snapshot(f[f["plugin_id"] != 180002], "2026-10-01T00:00:00+00:00"))
+    export.save_cache(vulns, [], {}, tmp_path)
+    history.record(tmp_path)  # the "current" pull
+    w = MainWindow(tmp_path)
+    assert w.overview.change_stats["new"][0].text() == "1"
+    assert "▲" in w.overview.cards["high"].delta.text()
+    w.navigate("findings", changed=True)
+    assert w.findings_tab.panel.proxy.rowCount() == 1
+    trends = w.navigate("trends")
+    assert w.current_view() == "trends" and "2 pulls" in trends.summary.text()
+    w.close()

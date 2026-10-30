@@ -28,8 +28,9 @@ HEADERS = {
     "with_serial": "With serial", "match_method": "Matched by", "members": "Members", "sys_name": "sysName",
     "sys_descr": "sysDescr", "stage": "Stage", "reason": "Reason", "models": "Models", "chassis": "Chassis",
     "risk": "Risk", "risk_band": "Risk band", "days_open": "Days open", "top_finding": "Top finding",
+    "change": "Change", "fixed": "Fixed", "mean_days": "Mean days", "median_days": "Median days",
 }
-STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage")
+STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage", "change")
 
 
 def _is_missing(value):

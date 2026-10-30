@@ -170,6 +170,48 @@ class OverviewTab(QWidget):
             lambda: self.view_requested.emit("devices", {"lifecycle": "Software upgrade suggested"}))
         self.grid.addLayout(cards_row)
 
+        # 2b. what changed since the last pull
+        changes = QFrame()
+        changes.setObjectName("Card")
+        cl = QHBoxLayout(changes)
+        cl.setContentsMargins(20, 14, 20, 14)
+        cl.setSpacing(28)
+        stats = QVBoxLayout()
+        self.changes_title = QLabel("SINCE LAST PULL")
+        self.changes_title.setObjectName("CardCaption")
+        self.changes_title.setFont(theme.font("caption", bold=True))
+        stats.addWidget(self.changes_title)
+        self.change_stats = {}
+        row = QHBoxLayout()
+        row.setSpacing(26)
+        for key, label in (("new", "New"), ("fixed", "Fixed"), ("reopened", "Reopened")):
+            block = QVBoxLayout()
+            value = QLabel("–")
+            value.setFont(theme.font("title", bold=True))
+            caption = QLabel(label)
+            caption.setObjectName("Muted")
+            block.addWidget(value)
+            block.addWidget(caption)
+            row.addLayout(block)
+            self.change_stats[key] = (value, caption)
+        row.addStretch(1)
+        stats.addLayout(row)
+        self.changes_note = QLabel()
+        self.changes_note.setObjectName("Muted")
+        self.changes_note.setWordWrap(True)
+        self.changes_note.setTextFormat(Qt.RichText)
+        self.changes_note.linkActivated.connect(lambda _l: self.view_requested.emit("findings", {"changed": True}))
+        stats.addWidget(self.changes_note)
+        stats.addStretch(1)
+        cl.addLayout(stats)
+        self.new_model = DataFrameModel()
+        self.new_view = make_table(self.new_model, stretch_column="plugin_name")
+        self.new_view.setSortingEnabled(False)
+        self.new_view.setMaximumHeight(190)
+        self.new_view.clicked.connect(self._new_clicked)
+        cl.addWidget(self.new_view, 1)
+        self.grid.addWidget(changes)
+
         # 3. highest-risk devices / vulnerabilities
         self.devices_model = DataFrameModel()
         self.devices_view = make_table(self.devices_model, stretch_column="top_finding")
@@ -225,6 +267,7 @@ class OverviewTab(QWidget):
 
         self.fleet_value.setText(f"{summary['index']:.0f}")
         self.fleet_band.setText(theme.band_badge(summary["band"], f"{summary['band']} risk"))
+        self.fleet_band.setProperty("band", summary["band"])
         self.band_caption.setText(f"{summary['devices']:,} DEVICES BY RISK BAND")
         self.band_bar.set_counts(counts)
         self._set_driver(scored)
@@ -284,6 +327,60 @@ class OverviewTab(QWidget):
     def _driver_clicked(self, _link):
         if self.top_plugin_id:
             self.plugin_activated.emit(self.top_plugin_id)
+
+    # ---- history ---------------------------------------------------------------------------
+    def set_history(self, changes, series):
+        """Deltas and sparklines on the KPI cards, and the 'since last pull' panel."""
+        recent = series.tail(20) if series is not None and not series.empty else None
+        trend_cols = {"critical": "critical", "high": "high", "exploitable": "exploitable", "at_risk": "at_risk"}
+        for card_key, col in trend_cols.items():
+            self.cards[card_key].set_trend(recent[col].tolist() if recent is not None else [])
+            delta = changes["deltas"] if changes else None
+            if delta is None:
+                self.cards[card_key].set_delta(None)
+            elif card_key == "at_risk":
+                self.cards[card_key].set_delta(delta["Critical"] + delta["High"])
+            else:
+                self.cards[card_key].set_delta(delta[col])
+        if changes:
+            d = changes["deltas"]["fleet"]
+            arrow = "▲" if d > 0 else ("▼" if d < 0 else "")
+            color = theme.tokens()["bad" if d > 0 else "good"]
+            change = (f"&nbsp; <span style='color:{color}; font-weight:600'>{arrow} {abs(d):g}</span>"
+                      f"<span style='color:{theme.tokens()['text_muted']}'> since last pull</span>" if d else "")
+            band_name = self.fleet_band.property("band") or ""
+            self.fleet_band.setText(theme.band_badge(band_name, f"{band_name} risk") + change)
+            prev = pd.Timestamp(changes["previous_at"])
+            when = (prev.tz_convert(None) if prev.tzinfo else prev).strftime("%d %b %H:%M")
+            self.changes_title.setText(f"SINCE LAST PULL  ·  {when}")
+            new, fixed, reopened = changes["new"], changes["fixed"], changes["reopened"]
+            t = theme.tokens()
+            for key, frame, token in (("new", new, "bad"), ("fixed", fixed, "good"), ("reopened", reopened, "warn")):
+                value, _cap = self.change_stats[key]
+                value.setText(f"{len(frame):,}")
+                value.setStyleSheet(f"color: {t[token]};" if len(frame) else "")
+            crit_new = int((pd.concat([new, reopened])["severity"].isin(["critical", "high"])).sum())
+            link = f"<a href='changed' style='color:{t['link']}'>Show new and reopened findings →</a>"
+            if len(new) + len(reopened):
+                self.changes_note.setText(f"{crit_new} of them are critical or high. {link}")
+            else:
+                self.changes_note.setText("Nothing new or reopened since the last pull.")
+            top_new = pd.concat([reopened, new]).sort_values("risk", ascending=False).head(6)
+            self.new_model.set_frame(top_new, ["risk", "severity", "hostname", "plugin_name"])
+            fit_columns(self.new_view, max_width=200)
+            self.new_view.setVisible(not top_new.empty)
+        else:
+            for value, _cap in self.change_stats.values():
+                value.setText("–")
+            self.changes_title.setText("SINCE LAST PULL")
+            self.changes_note.setText("History starts with this pull. After your next pull this shows which "
+                                      "findings are new, fixed or reopened, and the cards show the change.")
+            self.new_view.setVisible(False)
+
+    def _new_clicked(self, index):
+        frame = self.new_model.frame
+        if index.isValid() and index.row() < len(frame):
+            self.device_activated.emit(str(frame.iloc[index.row()]["hostname"]))
 
     # ---- charts -----------------------------------------------------------------------------
     def _severity_chart(self, findings):

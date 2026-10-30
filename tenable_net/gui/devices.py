@@ -236,8 +236,18 @@ class DevicesTab(QWidget):
             name, factors = detail[0]
             top = (f"<div style='color:{muted}'>Top finding: {html.escape(name)} = "
                    + " + ".join(f"{html.escape(lbl)} ({pts:g})" for lbl, pts in factors) + "</div>")
+        trend = ""
+        if getattr(self, "history_dir", None) is not None:
+            from tenable_net import history
+
+            points = history.device_trend(self.history_dir, device["hostname"])
+            if len(points) >= 2:
+                first, last = points[0][1], points[-1][1]
+                arrow = "▲" if last > first else ("▼" if last < first else "→")
+                trend = (f"<span style='color:{muted}'>&nbsp; trend over {len(points)} pulls: "
+                         f"{first:.0f} {arrow} {last:.0f}</span>")
         return (f"<p style='margin:8px 0 2px 0'>{theme.band_badge(band_name, f'Risk {score:.0f} · {band_name}')}"
-                f"&nbsp; <span style='color:{muted}'>why this score:</span></p>"
+                f"{trend}&nbsp; <span style='color:{muted}'>· why this score:</span></p>"
                 f"<table style='color:{muted}'>{items}</table>{top}")
 
     def _hardware_html(self, hostname):
