@@ -235,3 +235,26 @@ def test_crash_handler_logs_and_reports(app, tmp_path, monkeypatch):
         hook(*sys.exc_info())
     assert "ValueError: boom" in log.read_text()
     assert shown and "boom" in shown[0][2]
+
+
+def test_pull_dialog_stays_open_on_warnings(app, tmp_path):
+    from tenable_net import cisco
+
+    class FailingCisco:
+        def coverage(self, serials):
+            raise cisco.CiscoApiError("HTTP 403 (this API isn't enabled)")
+
+        eox_by_serial = eox_by_pid = coverage
+
+    tio = FakeTio()
+    dialog = PullDialog(tmp_path, client_factory=lambda: tio, akips_factory=lambda: None,
+                        cisco_factory=lambda: FailingCisco())
+    dialog.lifecycle.setChecked(True)
+    dialog.start()
+    wait_until(app, lambda: dialog.meta is not None)
+    dialog.worker.thread.wait(2000)
+    assert dialog.warnings >= 1 and dialog.result() == 0  # still open
+    assert "403" in dialog.log.toPlainText()
+    assert dialog.cancel_button.text() == "Close"
+    dialog.cancel()  # Close keeps the pulled data
+    assert dialog.result() == 1

@@ -133,6 +133,7 @@ def tenable_device_index(vulns, assets):
             "hostname": normalize._hostname(a),
             "ips": {a.get("ipv4")} - {None},
             "names": {_short(a.get(k)) for k in ("hostname", "fqdn", "netbios_name") if a.get(k)},
+            "os": " ".join(a.get("operating_system") or []),
         }
     for a in assets:
         uuid = a.get("id")
@@ -140,21 +141,43 @@ def tenable_device_index(vulns, assets):
             continue
         entry = index.setdefault(uuid, {
             "hostname": normalize.assets_frame([a]).iloc[0]["hostname"],
-            "ips": set(), "names": set(),
+            "ips": set(), "names": set(), "os": "",
         })
+        entry["os"] = entry["os"] or " ".join(a.get("operating_systems") or [])
         entry["ips"] |= set(a.get("ipv4s") or [])
         entry["names"] |= {_short(n) for n in (a.get("hostnames") or []) + (a.get("fqdns") or [])}
     return index
 
 
+# Cisco product-ID prefixes, for recognising Cisco hardware when sysDescr / OS don't say.
+CISCO_PID_RE = re.compile(
+    r"^(WS-C|C9\d{2,3}|C8\d{2,3}|C[1-6]\d{3}|N[2-9]K-|N\d{2,4}-|ISR\d|ASR\d|CISCO\d|AIR-|IE-?\d|IR\d|"
+    r"CBS\d|SG\d{3}|FPR-?\d|ASA\d|ME-\d|NCS-?\d|CAT\d|CW9|C1000|C1300)", re.I)
+
+
+def looks_cisco(model):
+    return bool(model) and bool(CISCO_PID_RE.match(str(model).strip()))
+
+
+def infer_vendor(*texts, model=""):
+    """First definite vendor from sysDescr / entPhysicalDescr / Tenable OS, else Cisco by PID shape."""
+    for text in texts:
+        vendor = normalize.vendor_of(text)
+        if vendor not in ("Unknown", "Other"):
+            return vendor
+    return "Cisco" if looks_cisco(model) else "Unknown"
+
+
 def build_inventory(akips_rows, tenable_rows, device_index):
     """Join sources into one row per chassis/stack member. AKiPS wins; Tenable fills gaps."""
-    by_ip, by_name = {}, {}
+    by_ip, by_name, host_os = {}, {}, {}
     for uuid, d in device_index.items():
         for ip in d["ips"]:
             by_ip.setdefault(ip, d["hostname"])
         for name in d["names"]:
             by_name.setdefault(name, d["hostname"])
+        if d.get("os"):
+            host_os.setdefault(d["hostname"], d["os"])
 
     rows = []
     akips_hosts = set()
@@ -167,7 +190,7 @@ def build_inventory(akips_rows, tenable_rows, device_index):
             "in_tenable": bool(host),
             "akips_device": r.get("akips_device"),
             "ip": r.get("ip"),
-            "vendor": normalize.vendor_of(r.get("sys_descr")),
+            "vendor": infer_vendor(r.get("sys_descr"), r.get("descr"), host_os.get(host), model=r.get("model")),
             "member": r.get("member"),
             "model": r.get("model") or "",
             "serial": r.get("serial") or "",
@@ -223,6 +246,17 @@ def lifecycle_status(eox, today=None):
     return "Unknown"
 
 
+def sample_cisco_keys(cache_dir):
+    """(serial, model) of one Cisco chassis in the cached inventory, for API diagnostics."""
+    inv = load_inventory(cache_dir)
+    if inv.empty:
+        return None, None
+    cisco_rows = inv[inv["vendor"] == "Cisco"]
+    serial = next((s for s in cisco_rows["serial"] if s), None)
+    model = next((m for m in cisco_rows["model"] if m), None)
+    return serial, model
+
+
 def cisco_keys(inv):
     """(serials, product IDs) to look up, for Cisco hardware only."""
     cisco_rows = inv[inv["vendor"] == "Cisco"]
@@ -246,10 +280,12 @@ def enrich(inv, cisco_cache, today=None):
             records.append({c: None for c in CISCO_COLUMNS} | {"contract": "", "lifecycle": ""})
             continue
         cov = cov_cache.get(serial) if serial else None
-        eox = sn_cache.get(serial) if serial else None
-        if not (eox and (eox.get("ldos") or eox.get("end_of_sale"))):
-            pid = ((cov or {}).get("orderable_pid") or model).upper()
-            eox = pid_cache.get(pid) or pid_cache.get(model) or eox
+        orderable = str((cov or {}).get("orderable_pid") or "").upper()
+        candidates = [sn_cache.get(serial) if serial else None, pid_cache.get(orderable) if orderable else None,
+                      pid_cache.get(model) if model else None]
+        candidates = [c for c in candidates if c]
+        dated = [c for c in candidates if c.get("ldos") or c.get("end_of_sale")]
+        eox = dated[0] if dated else next((c for c in candidates if c.get("eox_status")), None)
         if cov and cov.get("covered") is True:
             contract = "Covered"
         elif cov and cov.get("covered") is False:
@@ -355,6 +391,23 @@ def dump_samples(cache_dir, akips_raw=None, tenable_records=None, n=3):
     return written
 
 
+def dump_akips_devices(cache_dir, akips_client, rows, n=2):
+    """Full attribute listing for a few devices (preferring ones with a model but no serial)."""
+    out = Path(cache_dir) / SAMPLES_DIR
+    out.mkdir(parents=True, exist_ok=True)
+    no_serial = [r["akips_device"] for r in rows if r["model"] and not r["serial"]]
+    devices = list(dict.fromkeys(no_serial + [r["akips_device"] for r in rows]))[:n]
+    written = []
+    for device in devices:
+        path = out / f"akips_device_{re.sub(r'[^A-Za-z0-9_.-]', '_', device)}.txt"
+        try:
+            path.write_text(akips_client.device_dump(device))
+        except Exception as exc:  # noqa: BLE001 - diagnostics only
+            path.write_text(f"device dump failed: {exc}")
+        written.append(path)
+    return written
+
+
 def refresh(cache_dir, tio=None, akips_client=None, log=None, progress=None, cancelled=None, samples=0):
     """Fetch inventory from whichever sources are given and cache them. Returns a summary dict."""
     log = log or (lambda msg: None)
@@ -362,11 +415,20 @@ def refresh(cache_dir, tio=None, akips_client=None, log=None, progress=None, can
     akips_raw = None
     if akips_client is not None:
         log("Fetching hardware inventory from AKiPS ...")
-        akips_raw = akips_client.raw_responses()
+        akips_raw = akips_client.raw_responses(log=log)
         rows = akips.rows_from_raw(akips_raw)
         _write(cache_dir, AKIPS_FILE, rows)
         summary["akips_chassis"] = len(rows)
-        log(f"  AKiPS: {len(rows)} chassis/stack members.")
+        with_serial = sum(1 for r in rows if r["serial"])
+        log(f"  AKiPS: {len(rows)} chassis/stack members on {len({r['akips_device'] for r in rows})} devices, "
+            f"{sum(1 for r in rows if r['model'])} with model, {with_serial} with serial.")
+        if rows and not with_serial:
+            log("[yellow]WARNING: AKiPS returned no serial numbers, so contract lookups can't run for "
+                "these devices. Run `python -m tenable_net inventory --dump-samples` and check "
+                "cache/samples/akips_device_*.txt for where AKiPS keeps the serial.[/yellow]")
+        if samples:
+            for path in dump_akips_devices(cache_dir, akips_client, rows, samples):
+                log(f"  sample written: {path}")
     tenable_records = None
     if tio is not None:
         log(f"Exporting Tenable inventory plugins {sorted(INVENTORY_PLUGINS)} ...")
@@ -375,7 +437,8 @@ def refresh(cache_dir, tio=None, akips_client=None, log=None, progress=None, can
         rows = parse_tenable_inventory(tenable_records)
         _write(cache_dir, TENABLE_FILE, rows)
         summary["tenable_chassis"] = len(rows)
-        log(f"  Tenable: {len(tenable_records)} plugin results, {len(rows)} chassis parsed.")
+        log(f"  Tenable: {len(tenable_records)} plugin results, {len(rows)} chassis parsed, "
+            f"{sum(1 for r in rows if r['serial'])} with serial.")
     if samples:
         for path in dump_samples(cache_dir, akips_raw, tenable_records, samples):
             log(f"  sample written: {path}")
@@ -401,7 +464,13 @@ def refresh_cisco(cache_dir, cisco_client, force=False, log=None):
     inv = load_inventory(cache_dir)
     serials, pids = cisco_keys(inv)
     log = log or (lambda msg: None)
-    log(f"Cisco lookups for {len(serials)} serials / {len(pids)} product IDs ...")
+    n_cisco = int((inv["vendor"] == "Cisco").sum()) if not inv.empty else 0
+    log(f"Cisco lookups: {n_cisco} of {len(inv)} inventoried chassis are Cisco -> "
+        f"{len(serials)} serials, {len(pids)} product IDs.")
+    if inv.empty:
+        log("[yellow]WARNING: no hardware inventory cached yet; pull inventory first.[/yellow]")
+    elif not serials and not pids:
+        log("[yellow]WARNING: nothing to look up: no Cisco chassis with a model or serial number.[/yellow]")
     cisco.refresh(cisco_client, serials, pids, cache_dir, force=force, log=log)
     return len(serials), len(pids)
 

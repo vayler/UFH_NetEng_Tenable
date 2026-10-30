@@ -83,6 +83,18 @@ def cmd_hardware(args):
     summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
 
 
+def cmd_cisco_test(args):
+    """Check the token and each Cisco API separately, using a real serial/model when cached."""
+    serial, pid = inventory.sample_cisco_keys(args.cache_dir)
+    failed = False
+    for name, ok, detail in cisco.diagnose(cisco.get_client(), serial=args.serial or serial, pid=args.pid or pid):
+        mark = {True: "[green]OK[/green]  ", False: "[red]FAIL[/red]", None: "[dim]skip[/dim]"}[ok]
+        summaries.console.print(f"{mark} {name}: {detail}")
+        failed |= ok is False
+    if failed:
+        raise RuntimeError("One or more Cisco API checks failed (see above).")
+
+
 def cmd_cisco_refresh(args):
     inventory.refresh_cisco(args.cache_dir, cisco.get_client(), force=args.force, log=summaries.console.print)
     summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
@@ -146,6 +158,11 @@ def build_parser():
     p = sub.add_parser("hardware", help="show cached hardware lifecycle/contract summary")
     p.add_argument("--top", type=int, default=20, help="rows per table")
     p.set_defaults(func=cmd_hardware)
+
+    p = sub.add_parser("cisco-test", help="check the Cisco token, EoX and Serial Number to Info access")
+    p.add_argument("--serial", help="serial number to test contract lookup with (default: one from inventory)")
+    p.add_argument("--pid", help="extra product ID to test EoX with (default: one from inventory)")
+    p.set_defaults(func=cmd_cisco_test)
 
     p = sub.add_parser("cisco-refresh", help="re-query Cisco EoX + contract coverage for cached inventory")
     p.add_argument("--force", action="store_true", help="ignore the 7-day cache")

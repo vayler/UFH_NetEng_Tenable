@@ -208,7 +208,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Pull complete.", 5000)
 
     def open_settings(self):
-        SettingsDialog(self).exec()
+        SettingsDialog(self, cache_dir=self.cache_dir).exec()
 
     def export_report(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)

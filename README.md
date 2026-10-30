@@ -6,7 +6,7 @@ A desktop app and command-line tool for pulling network-equipment vulnerability 
 
 ## Windows: one-click start
 
-1. Download this branch as a ZIP and extract it, or clone it.
+1. Download the `main` branch as a ZIP (**Code → Download ZIP**) and extract it, or clone it.
 2. Double-click **`run_gui.bat`**.
 
 The launcher:
@@ -99,6 +99,7 @@ python -m tenable_net inventory                 # AKiPS + Tenable inventory, the
 python -m tenable_net inventory --skip-akips    # Tenable plugin output only
 python -m tenable_net hardware                  # lifecycle / contract summary from cache
 python -m tenable_net cisco-refresh --force     # re-query Cisco, ignoring the 7-day cache
+python -m tenable_net cisco-test                # check token, EoX and Serial Number to Info access
 python -m tenable_net pull --with-inventory     # vuln pull + inventory in one go
 ```
 
@@ -113,8 +114,24 @@ The Overview shows a "Past LDoS / not covered" card, and the Excel report gets a
 
 ![Devices with hardware lifecycle](docs/screenshots/devices-hardware.png)
 
-> **First run: check the parsers against your data.** The AKiPS response format and the Tenable plugin output were written from documentation, not from your instances. Run
-> `python -m tenable_net inventory --dump-samples` and look at `cache/samples/`. If models or serials come out blank, share a scrubbed sample so the parsing can be adjusted.
+### Troubleshooting enrichment
+
+Start with **Settings → Cisco → Test connection**, or `python -m tenable_net cisco-test`. It checks each piece separately:
+
+| Check | What a failure means |
+|---|---|
+| **Token** | Wrong client ID/secret, or a blocked token URL (`CISCO_TOKEN_URL`). |
+| **EoX** | Tested with a known end-of-life PID, plus a model from your inventory. `HTTP 403` means the EoX API isn't enabled for your Cisco API app. Request it in the Cisco API Console. |
+| **Serial Number to Info** | Contract lookup, tested with a serial from your inventory. `HTTP 403` means that API isn't enabled. "No record" means the serial isn't linked to your contracts or Smart Account. "Skipped" means no serial numbers have been collected yet. |
+
+Notes:
+- **Contract coverage needs serial numbers.** When AKiPS or Tenable supplies only models, you still get EoX dates by product ID, but not contract status.
+- **The pull log reports counts per source.** For example: chassis with a model / with a serial, how many are Cisco, how many serials and product IDs were sent, and how many came back with data. If a step fails, the Pull dialog stays open with the warning instead of closing.
+- **If AKiPS shows models but no serials:**
+  1. Run `python -m tenable_net inventory --dump-samples`.
+  2. Open `cache/samples/akips_device_*.txt`. These list every attribute AKiPS holds for devices that have a model but no serial. Find the line with the serial number.
+  3. Share that line (scrubbed), so the attribute can be added. The tool already tries `ENTITY-MIB.entPhysicalSerialNum`, `OLD-CISCO-CHASSIS-MIB.chassisId` and `CISCO-STACK-MIB.chassisSerialNumberString`.
+- **Cisco results are cached.** Results that came back with data are kept 7 days. Lookups that returned nothing are retried after 1 day. To re-query right away, tick "Re-query Cisco" in the Pull dialog, or run `cisco-refresh --force`.
 
 ## Command line
 

@@ -1,5 +1,6 @@
 """Pull-from-Tenable and API-key settings dialogs."""
 
+import html
 import os
 import re
 
@@ -61,12 +62,17 @@ class PullDialog(QDialog):
         self.lifecycle.setChecked(cisco.configured())
         if not cisco.configured():
             self.lifecycle.setToolTip("Add Cisco API credentials in Settings to enable.")
+        self.recheck = QCheckBox("Re-query Cisco even if results are cached (normally kept 7 days)")
         self.hardware.toggled.connect(lambda on: self.lifecycle.setEnabled(on))
+        self.lifecycle.toggled.connect(lambda on: self.recheck.setEnabled(on))
+        self.recheck.setEnabled(self.lifecycle.isChecked())
+        self.warnings = 0
         form.addRow("Last seen within", self.since)
         form.addRow(self.plugin_output)
         form.addRow(self.assets)
         form.addRow(self.hardware)
         form.addRow(self.lifecycle)
+        form.addRow(self.recheck)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -102,7 +108,7 @@ class PullDialog(QDialog):
 
     def _controls(self):
         return (self.start_button, *self.sev_checks.values(), *self.state_checks.values(), self.since,
-                self.plugin_output, self.assets, self.hardware, self.lifecycle)
+                self.plugin_output, self.assets, self.hardware, self.lifecycle, self.recheck)
 
     def start(self):
         opts = self.options()
@@ -113,7 +119,7 @@ class PullDialog(QDialog):
             tio = self.client_factory()
         except client.MissingCredentials:
             QMessageBox.warning(self, "API keys needed", "Add your Tenable API keys in Settings first.")
-            if SettingsDialog(self).exec() != QDialog.Accepted:
+            if SettingsDialog(self, cache_dir=self.cache_dir).exec() != QDialog.Accepted:
                 return
             tio = self.client_factory()
 
@@ -134,7 +140,7 @@ class PullDialog(QDialog):
             if self.hardware.isChecked():
                 inventory.refresh_all(
                     self.cache_dir, tio=tio, akips_client=akips_client, cisco_client=cisco_client,
-                    strict=False, log=worker.log.emit, progress=worker.progress.emit, cancelled=cancelled,
+                    force_cisco=self.recheck.isChecked(), strict=False, log=worker.log.emit, progress=worker.progress.emit, cancelled=cancelled,
                 )
             return meta
 
@@ -146,7 +152,10 @@ class PullDialog(QDialog):
                                    on_log=self._log, on_progress=self._progress)
 
     def _log(self, message):
-        self.log.appendPlainText(re.sub(r"\[/?[a-z ]+\]", "", str(message)))  # drop rich markup
+        text = re.sub(r"\[/?[a-z ]+\]", "", str(message))  # drop rich markup
+        if "WARNING" in text:
+            self.warnings += 1
+        self.log.appendPlainText(text)
 
     def _progress(self, stage, count):
         self.status.setText(f"Downloading {stage}: {count:,} records…")
@@ -155,8 +164,16 @@ class PullDialog(QDialog):
         self.meta = meta
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
-        self.status.setText(f"Done: {meta['vuln_count']:,} findings, {meta['asset_count']:,} assets.")
-        self.accept()
+        done = f"Done: {meta['vuln_count']:,} findings, {meta['asset_count']:,} assets."
+        if not self.warnings:
+            self.status.setText(done)
+            self.accept()
+            return
+        # Keep the dialog open so warnings (e.g. a Cisco API that isn't enabled) can be read.
+        self.status.setText(f"<b>{done} Finished with {self.warnings} warning(s), see the log below.</b>")
+        self.log.setMaximumHeight(16777215)
+        self.cancel_button.setText("Close")
+        self.cancel_button.setEnabled(True)
 
     def _error(self, message):
         self.progress.setRange(0, 1)
@@ -173,6 +190,9 @@ class PullDialog(QDialog):
         QMessageBox.critical(self, "Pull failed", message.split("\n\n")[0])
 
     def cancel(self):
+        if self.meta is not None:  # finished with warnings: "Close" keeps the pulled data
+            self.accept()
+            return
         if self.worker and self.worker.thread.isRunning():
             self.worker.cancel_requested = True
             self.cancel_button.setEnabled(False)
@@ -238,11 +258,14 @@ class _ServicePage(QWidget):
 
     def _ok(self, message):
         self.test_button.setEnabled(True)
-        self.result.setText(f"<span style='color:#2e7d32'>✔ {message}</span>")
+        self.result.setText(f"<span style='color:#2e7d32'>{html.escape(message)}</span>")
 
     def _fail(self, message):
         self.test_button.setEnabled(True)
-        self.result.setText(f"<span style='color:#c62828'>✘ {message.splitlines()[0]}</span>")
+        first = message.split("\n\n")[0].splitlines()
+        text = next((line for line in reversed(first) if line.strip()), message)
+        text = re.sub(r"^\w+(Error|Exception): ", "", text)
+        self.result.setText(f"<span style='color:#c62828'>{html.escape(text)}</span>")
 
 
 def _test_tenable(v):
@@ -255,16 +278,26 @@ def _test_akips(v):
     return f"Connected: {c.test():,} devices"
 
 
-def _test_cisco(v):
+def _test_cisco(v, cache_dir=None):
+    """Token + each API. Uses a real serial / model from the cached inventory when there is one."""
     c = cisco.get_client(v["CISCO_CLIENT_ID"], v["CISCO_CLIENT_SECRET"])
-    c.token()
-    return "Token issued"
+    serial = pid = None
+    if cache_dir is not None:
+        try:
+            serial, pid = inventory.sample_cisco_keys(cache_dir)
+        except Exception:  # noqa: BLE001 - the probe still works without inventory
+            pass
+    results = cisco.diagnose(c, serial=serial, pid=pid)
+    text = " · ".join(f"{'✔' if ok else ('–' if ok is None else '✘')} {name}: {detail}" for name, ok, detail in results)
+    if any(ok is False for _n, ok, _d in results):
+        raise RuntimeError(text)
+    return text
 
 
 class SettingsDialog(QDialog):
     """Tenable, AKiPS and Cisco API credentials, each with a connection test. Saved to .env."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, cache_dir=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
@@ -280,7 +313,9 @@ class SettingsDialog(QDialog):
             "Cisco": _ServicePage(
                 [("CISCO_CLIENT_ID", "Client ID", False), ("CISCO_CLIENT_SECRET", "Client secret", True)],
                 "Optional. Cisco Support API app credentials with EoX and Serial Number to Information access. "
-                "Override endpoints with CISCO_TOKEN_URL / CISCO_API_BASE in .env if needed.", _test_cisco),
+                "Override endpoints with CISCO_TOKEN_URL / CISCO_API_BASE in .env if needed. The test checks the "
+                "token, EoX and Serial Number to Info separately.",
+                lambda v: _test_cisco(v, cache_dir)),
         }
         self.tabs = QTabWidget()
         for name, page in self.pages.items():

@@ -38,8 +38,24 @@ def _batches(items, size):
         yield items[i:i + size]
 
 
+class CiscoApiError(RuntimeError):
+    """A Cisco Support API call failed or returned an error instead of data."""
+
+
+def _error_message(payload):
+    """Return Cisco's error text if the payload is an error response rather than data."""
+    if not isinstance(payload, dict):
+        return f"unexpected response: {str(payload)[:200]}"
+    for key in ("ErrorResponse", "errorResponse", "error", "fault", "Fault"):
+        if key in payload:
+            return f"{key}: {json.dumps(payload[key])[:300]}"
+    return None
+
+
 def parse_eox(payload):
     """Map each input value (serial or PID) to its lifecycle record."""
+    if "EOXRecord" not in payload:
+        raise CiscoApiError(f"EoX: {_error_message(payload) or 'response has no EOXRecord'}")
     out = {}
     for rec in payload.get("EOXRecord") or []:
         error = rec.get("EOXError") or {}
@@ -60,6 +76,8 @@ def parse_eox(payload):
 
 
 def parse_coverage(payload):
+    if "serial_numbers" not in payload:
+        raise CiscoApiError(f"Serial Number to Info: {_error_message(payload) or 'response has no serial_numbers'}")
     out = {}
     for rec in payload.get("serial_numbers") or []:
         serial = str(rec.get("sr_no") or "").strip().upper()
@@ -122,9 +140,17 @@ class CiscoClient:
             if resp.status_code == 401 and attempt == 0:
                 self._token = None  # expired token: refresh once
                 continue
-            resp.raise_for_status()
-            return resp.json()
-        return {}
+            if resp.status_code >= 400:
+                hint = {401: " (credentials rejected for this API)",
+                        403: " (this API isn't enabled for your Cisco API app / contract)",
+                        404: " (endpoint not found; check CISCO_API_BASE)"}.get(resp.status_code, "")
+                raise CiscoApiError(f"HTTP {resp.status_code}{hint} for {path.split('/')[1]}: "
+                                    f"{getattr(resp, 'text', '')[:300]}")
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise CiscoApiError(f"non-JSON response for {path}: {getattr(resp, 'text', '')[:200]}") from exc
+        raise CiscoApiError(f"gave up on {path} after {retries} attempts (rate limited / server errors)")
 
     def _eox(self, path_template, values):
         out = {}
@@ -149,6 +175,42 @@ class CiscoClient:
         for batch in _batches(serials, COVERAGE_BATCH):
             out.update(parse_coverage(self._get(COVERAGE_PATH.format(items=",".join(batch)))))
         return out
+
+
+# A long-retired PID with published EoX dates: a reliable probe that the EoX API answers.
+PROBE_PID = "WS-C3750X-48P-S"
+
+
+def diagnose(client, serial=None, pid=None):
+    """Check each API the app uses. Returns [(name, ok, detail)]; never raises for API errors."""
+    results = []
+    try:
+        client.token()
+        results.append(("Token", True, "issued"))
+    except Exception as exc:  # noqa: BLE001
+        return [("Token", False, str(exc)[:200])]
+    pids = [PROBE_PID] + ([pid] if pid and pid.upper() != PROBE_PID else [])
+    try:
+        recs = client.eox_by_pid(pids)
+        parts = []
+        for p in pids:
+            rec = recs.get(p.upper())
+            parts.append(f"{p}: LDoS {rec['ldos']}" if rec and rec.get("ldos")
+                         else f"{p}: {rec.get('eox_status') if rec else 'no record'}")
+        results.append(("EoX", True, "; ".join(parts)))
+    except Exception as exc:  # noqa: BLE001
+        results.append(("EoX", False, str(exc)[:200]))
+    if serial:
+        try:
+            cov = client.coverage([serial]).get(serial.upper())
+            detail = (f"{serial}: {'covered until ' + str(cov.get('contract_end')) if cov.get('covered') else 'not covered'}"
+                      if cov else f"{serial}: no record (serial not linked to your contracts?)")
+            results.append(("Serial Number to Info", True, detail))
+        except Exception as exc:  # noqa: BLE001
+            results.append(("Serial Number to Info", False, str(exc)[:200]))
+    else:
+        results.append(("Serial Number to Info", None, "skipped: no serial numbers in the inventory yet"))
+    return results
 
 
 def configured():
@@ -186,12 +248,17 @@ def save_cache(cache_dir, data):
     (Path(cache_dir) / CACHE_FILE).write_text(json.dumps(data, indent=1))
 
 
+MISS_TTL_DAYS = 1
+
+
 def _stale(entry, now, ttl_days):
+    """Hits expire after ttl_days; misses (no data from Cisco) are retried after a day."""
     try:
         fetched = datetime.fromisoformat(entry["fetched_at"])
     except (KeyError, TypeError, ValueError):
         return True
-    return now - fetched > timedelta(days=ttl_days)
+    has_data = any(v not in (None, "") for k, v in entry.items() if k != "fetched_at")
+    return now - fetched > timedelta(days=ttl_days if has_data else MISS_TTL_DAYS)
 
 
 def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DAYS, log=None):
@@ -205,18 +272,31 @@ def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DA
         keys = sorted({k.strip().upper() for k in keys if k and k.strip()})
         return keys if force else [k for k in keys if k not in cache[section] or _stale(cache[section][k], now, ttl_days)]
 
-    jobs = (
-        ("coverage", todo("coverage", serials), cisco_client.coverage, "contract coverage"),
-        ("eox_serial", todo("eox_serial", serials), cisco_client.eox_by_serial, "EoX by serial"),
-        ("eox_pid", todo("eox_pid", pids), cisco_client.eox_by_pid, "EoX by product ID"),
-    )
-    for section, keys, fetch, label in jobs:
+    errors = []
+
+    def run(section, keys, fetch, label):
         if not keys:
-            log(f"  Cisco {label}: cache is current.")
-            continue
+            log(f"  Cisco {label}: nothing new to look up (cached or none).")
+            return
         log(f"  Cisco {label}: querying {len(keys)} ...")
-        results = fetch(keys)
-        for key in keys:  # record misses too, so they aren't re-queried every run
+        try:
+            results = fetch(keys)
+        except CiscoApiError as exc:  # keep going: another API may still be entitled
+            log(f"[yellow]WARNING: Cisco {label} failed: {exc}[/yellow]")
+            errors.append(f"{label}: {exc}")
+            return
+        found = sum(1 for k in keys if results.get(k))
+        log(f"    {found} of {len(keys)} returned data.")
+        for key in keys:  # record misses too; they are retried after MISS_TTL_DAYS
             cache[section][key] = {**results.get(key, {}), "fetched_at": stamp}
         save_cache(cache_dir, cache)
+
+    serials = {k.strip().upper() for k in serials if k and k.strip()}
+    run("coverage", todo("coverage", serials), cisco_client.coverage, "contract coverage (Serial Number to Info)")
+    # Coverage returns the orderable PID (e.g. C9300-48P-E), which is what EoX knows the product as.
+    orderable = {(cache["coverage"].get(s) or {}).get("orderable_pid") for s in serials} - {None, ""}
+    run("eox_serial", todo("eox_serial", serials), cisco_client.eox_by_serial, "EoX by serial")
+    run("eox_pid", todo("eox_pid", set(pids) | orderable), cisco_client.eox_by_pid, "EoX by product ID")
+    if errors:
+        raise CiscoApiError(" | ".join(errors))
     return cache

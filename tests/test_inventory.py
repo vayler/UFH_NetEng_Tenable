@@ -3,6 +3,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from tenable_net import akips, cisco, export, inventory
@@ -242,8 +243,11 @@ def test_cisco_refresh_uses_cache_ttl(tmp_path):
 # ---- cache round trip --------------------------------------------------------------
 
 class FakeAkips:
-    def raw_responses(self):
+    def raw_responses(self, log=None):
         return fixture("akips_raw_sample.json")
+
+    def device_dump(self, device):
+        return f"{device} sys SNMPv2-MIB.sysDescr = test\n"
 
 
 class FakeTio:
@@ -262,6 +266,140 @@ def test_refresh_and_load_inventory(tmp_path):
     assert summary == {"akips_chassis": 4, "tenable_chassis": 4}
     assert (tmp_path / "samples" / "akips_raw.txt").exists()
     assert (tmp_path / "samples" / "tenable_inventory_sample.json").exists()
+    assert list((tmp_path / "samples").glob("akips_device_*.txt"))
     inv = inventory.load_inventory(tmp_path, today=TODAY)
     assert set(inv["hostname"]) == {"core-sw-01", "core-sw-02", "edge-fw-01", "lab-sw-01", "old-sw-07"}
     assert {"contract", "ldos", "lifecycle"} <= set(inv.columns)
+
+
+# ---- robustness fixes: vendor inference, AKiPS fallbacks, Cisco errors -------------------
+
+def test_vendor_inferred_without_sysdescr(device_index):
+    rows = [
+        {"akips_device": "core-sw-01", "ip": "10.0.0.1", "sys_descr": None, "member": 1, "model": "PA-3220",
+         "serial": "X1", "sw_version": ""},  # matched Tenable device runs Cisco IOS XE -> Cisco
+        {"akips_device": "lab-sw-01", "ip": "10.9.0.5", "sys_descr": None, "member": 1, "model": "WS-C2960X-48FPD-L",
+         "serial": "X2", "sw_version": ""},  # not in Tenable; Cisco by PID shape
+        {"akips_device": "lab-fw-01", "ip": "10.9.0.6", "sys_descr": None, "member": 1, "model": "PA-3220",
+         "serial": "X3", "sw_version": ""},  # unknown
+    ]
+    inv = inventory.build_inventory(rows, [], device_index).set_index("akips_device")
+    assert inv.loc["core-sw-01", "vendor"] == "Cisco"
+    assert inv.loc["lab-sw-01", "vendor"] == "Cisco"
+    assert inv.loc["lab-fw-01", "vendor"] == "Unknown"
+    serials, pids = inventory.cisco_keys(inv.reset_index())
+    assert serials == ["X1", "X2"]
+
+
+@pytest.mark.parametrize("model", ["C9300-48P", "WS-C3850-48P", "N9K-C93180YC-EX", "ISR4331/K9", "C8300-1N1S-4T2X",
+                                   "AIR-AP2802I-B-K9", "ASR1001-X", "C1000-24T-4G-L"])
+def test_looks_cisco(model):
+    assert inventory.looks_cisco(model)
+
+
+@pytest.mark.parametrize("model", ["PA-3220", "EX4300-48P", "JL659A", "DCS-7050SX3", "FG-200F", ""])
+def test_not_cisco(model):
+    assert not inventory.looks_cisco(model)
+
+
+def test_akips_without_entity_class():
+    lines = [("sw1", "1", "ENTITY-MIB.entPhysicalName", "Switch 1"),
+             ("sw1", "1", "ENTITY-MIB.entPhysicalModelName", "C9300-48P"),
+             ("sw1", "1", "ENTITY-MIB.entPhysicalSerialNum", "SN1"),
+             ("sw1", "9", "ENTITY-MIB.entPhysicalName", "Switch 1 - Power Supply A"),
+             ("sw1", "9", "ENTITY-MIB.entPhysicalModelName", "PWR-C1-715WAC"),
+             ("sw2", "5", "ENTITY-MIB.entPhysicalModelName", "WS-C2960X-48FPD-L"),
+             ("sw2", "7", "ENTITY-MIB.entPhysicalModelName", "GLC-SX-MMD")]
+    rows = {r["akips_device"]: r for r in akips.chassis_rows([], lines)}
+    assert rows["sw1"]["serial"] == "SN1" and rows["sw1"]["model"] == "C9300-48P"
+    assert rows["sw2"]["model"] == "WS-C2960X-48FPD-L"  # lowest index with a model
+    assert len(akips.chassis_rows([], lines)) == 2
+
+
+def test_akips_device_level_serial_fallback():
+    sys_lines = [("sw1", "sys", "OLD-CISCO-CHASSIS-MIB.chassisId", "FOC9999X0ZZ")]
+    lines = [("sw1", "1", "ENTITY-MIB.entPhysicalClass", "chassis"),
+             ("sw1", "1", "ENTITY-MIB.entPhysicalModelName", "WS-C3750X-48P-S"),
+             ("sw1", "1", "ENTITY-MIB.entPhysicalSerialNum", "")]
+    assert akips.chassis_rows(sys_lines, lines)[0]["serial"] == "FOC9999X0ZZ"
+
+
+def test_cisco_http_error_is_explained():
+    session = FakeSession([FakeResponse(403)])
+    with pytest.raises(cisco.CiscoApiError, match="403.*isn't enabled"):
+        cisco.CiscoClient("id", "secret", session=session).eox_by_pid(["X"])
+
+
+def test_cisco_error_payload_raises():
+    with pytest.raises(cisco.CiscoApiError, match="ErrorResponse"):
+        cisco.parse_coverage({"ErrorResponse": {"APIError": {"ErrorCode": "API_SNI_0001"}}})
+    with pytest.raises(cisco.CiscoApiError):
+        cisco.parse_eox({})
+
+
+class PartlyEntitledCisco(CountingCisco):
+    """Contract lookup works; EoX is not enabled for this API app."""
+
+    def coverage(self, serials):
+        self.calls.append(("coverage", serials))
+        return {s: {"covered": True, "orderable_pid": "C9300-48P-E"} for s in serials}
+
+    def eox_by_serial(self, serials):
+        raise cisco.CiscoApiError("HTTP 403 (this API isn't enabled)")
+
+    def eox_by_pid(self, pids):
+        self.calls.append(("eox_pid", sorted(pids)))
+        return {"C9300-48P-E": {"ldos": "2030-01-31", "eox_status": "Announced"}}
+
+
+def test_cisco_refresh_continues_after_one_api_fails(tmp_path):
+    fake = PartlyEntitledCisco()
+    logs = []
+    with pytest.raises(cisco.CiscoApiError, match="EoX by serial"):
+        cisco.refresh(fake, ["S1"], ["C9300-48P"], tmp_path, log=logs.append)
+    cache = cisco.load_cache(tmp_path)
+    assert cache["coverage"]["S1"]["covered"] is True          # saved despite the EoX failure
+    assert ("eox_pid", ["C9300-48P", "C9300-48P-E"]) in fake.calls  # orderable PID from coverage looked up
+    assert cache["eox_pid"]["C9300-48P-E"]["ldos"] == "2030-01-31"
+    assert any("WARNING" in line for line in logs)
+
+
+def test_enrich_uses_orderable_pid():
+    inv = pd.DataFrame([{"hostname": "h", "in_tenable": True, "akips_device": "h", "ip": "1", "vendor": "Cisco",
+                         "member": 1, "model": "C9300-48P", "serial": "S1", "sw_version": "", "source": "AKiPS"}])
+    cache = {"coverage": {"S1": {"covered": True, "orderable_pid": "C9300-48P-E"}},
+             "eox_serial": {"S1": {"eox_status": "No EoX announced"}},
+             "eox_pid": {"C9300-48P": {"eox_status": "No EoX announced"},
+                         "C9300-48P-E": {"ldos": "2025-01-31", "end_of_sale": "2020-01-31", "eox_status": "Announced"}}}
+    row = inventory.enrich(inv, cache, TODAY).iloc[0]
+    assert row["lifecycle"] == "Past LDoS" and row["contract"] == "Covered"
+
+
+def test_cisco_misses_retried_after_a_day(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
+    cisco.save_cache(tmp_path, {"coverage": {"S1": {"fetched_at": old}, "S2": {"covered": True, "fetched_at": old}},
+                                "eox_serial": {}, "eox_pid": {}})
+    fake = CountingCisco()
+    cisco.refresh(fake, ["S1", "S2"], [], tmp_path)
+    assert ("coverage", ["S1"]) in fake.calls  # the 2-day-old miss is retried; the hit is still fresh
+
+
+class DiagCisco(CountingCisco):
+    def token(self):
+        return "t"
+
+    def eox_by_pid(self, pids):
+        return {cisco.PROBE_PID: {"ldos": "2021-10-31"}}
+
+    def coverage(self, serials):
+        raise cisco.CiscoApiError("HTTP 403 (this API isn't enabled for your Cisco API app / contract)")
+
+
+def test_cisco_diagnose():
+    results = {name: (ok, detail) for name, ok, detail in cisco.diagnose(DiagCisco(), serial="S1")}
+    assert results["Token"][0] and results["EoX"][0] and "2021-10-31" in results["EoX"][1]
+    assert results["Serial Number to Info"][0] is False and "403" in results["Serial Number to Info"][1]
+    skipped = {name: ok for name, ok, _ in cisco.diagnose(DiagCisco())}
+    assert skipped["Serial Number to Info"] is None
