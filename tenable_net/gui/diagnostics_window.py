@@ -30,10 +30,11 @@ DETAIL_FIELDS = [
 class DiagnosticsWindow(QWidget):
     """Non-modal window; reload() recomputes the report from the cache."""
 
-    def __init__(self, cache_dir, parent=None):
-        super().__init__(parent, Qt.Window)
+    def __init__(self, cache_dir, parent=None, embedded=False):
+        super().__init__(parent, Qt.Widget if embedded else Qt.Window)
         self.setWindowTitle("Enrichment diagnostics")
-        self.resize(1300, 820)
+        if not embedded:
+            self.resize(1300, 820)
         self.cache_dir = cache_dir
         self.devices = pd.DataFrame()
         self.worker = None
@@ -116,9 +117,11 @@ class DiagnosticsWindow(QWidget):
         tabs.addTab(split, "Devices")
         unmatched_page = QWidget()
         uv = QVBoxLayout(unmatched_page)
-        uv.addWidget(QLabel("AKiPS devices that didn't match any Tenable device by IP, sysName or name. If one of "
-                            "them is a Tenable device under another name, add <code>akips_device,tenable_hostname</code> "
-                            f"to <code>{html.escape(str(inventory.aliases_path()))}</code> and click Refresh."))
+        note = QLabel("AKiPS devices that didn't match any Tenable device by IP, sysName or name. If one of "
+                      "them is a Tenable device under another name, add <code>akips_device,tenable_hostname</code> "
+                      f"to <code>{html.escape(str(inventory.aliases_path()))}</code> and click Refresh.")
+        note.setWordWrap(True)
+        uv.addWidget(note)
         uv.addWidget(self.unmatched_view)
         tabs.addTab(unmatched_page, "Unmatched AKiPS devices")
         self.tabs = tabs
@@ -164,6 +167,12 @@ class DiagnosticsWindow(QWidget):
         self.tabs.setTabText(1, f"Unmatched AKiPS devices ({len(unmatched)})")
         self.stage_view.selectRow(1 if len(stages) else 0)  # first problem stage
         self._filter()
+
+    def select_stage(self, stage):
+        frame = self.stage_model.frame
+        matches = frame.index[frame["stage"] == stage].tolist()
+        if matches:
+            self.stage_view.selectRow(matches[0])
 
     def current_stage(self):
         idx = self.stage_view.currentIndex()

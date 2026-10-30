@@ -7,6 +7,8 @@ import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from PySide6.QtGui import QColor
 
+from tenable_net import glossary
+from tenable_net.gui import theme
 from tenable_net.normalize import SEVERITY_ORDER
 
 SORT_ROLE = Qt.UserRole + 1
@@ -26,13 +28,7 @@ HEADERS = {
     "with_serial": "With serial", "match_method": "Matched by", "members": "Members", "sys_name": "sysName",
     "sys_descr": "sysDescr", "stage": "Stage", "reason": "Reason", "models": "Models", "chassis": "Chassis",
 }
-# Text colors for hardware lifecycle / contract status cells (readable on light and dark backgrounds).
-STATUS_COLORS = {
-    "Past LDoS": "#e53935", "LDoS < 12 mo": "#fb8c00", "End of sale": "#c49000",
-    "Not covered": "#e53935", "Covered": "#43a047",
-    "Upgrade suggested": "#fb8c00", "On suggested release": "#43a047",
-}
-STATUS_COLUMNS = ("lifecycle", "contract", "sw_status")
+STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage")
 
 
 def _is_missing(value):
@@ -126,13 +122,16 @@ class DataFrameModel(QAbstractTableModel):
             if self._numeric[column] and column not in ("plugin_id", "first_found", "last_found", "last_seen"):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return int(Qt.AlignLeft | Qt.AlignVCenter)
-        if role == Qt.ForegroundRole and column in STATUS_COLUMNS and value in STATUS_COLORS:
-            return QColor(STATUS_COLORS[value])
+        if role == Qt.ForegroundRole and column in STATUS_COLUMNS:
+            hex_color = theme.status_color(value)
+            return QColor(hex_color) if hex_color else None
         if role == Qt.ToolTipRole and column in ("plugin_name", "cves", "os", "model"):
             return display(column, value)
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.ToolTipRole and orientation == Qt.Horizontal:
+            return glossary.tooltip(self._columns[section])
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:

@@ -5,26 +5,32 @@ from PySide6.QtCharts import (
     QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QHorizontalStackedBarSeries, QValueAxis,
 )
 from PySide6.QtCore import QMargins, Qt, Signal
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QVBoxLayout, QWidget
 
 from tenable_net import reports
+from tenable_net.gui import theme
 from tenable_net.gui.models import RAW_ROLE, DataFrameModel
 from tenable_net.gui.widgets import SEVERITY_COLORS, KpiCard, fit_columns, make_table, severity_color
 
 CHART_SEVERITIES = ["critical", "high", "medium", "low"]
 
 
-def _style_chart(chart, widget):
-    pal = widget.palette()
+def _style_chart(chart, widget=None):
+    """Quiet chart styling from the theme: no backgrounds, muted labels, faint gridlines."""
+    t = theme.tokens()
     chart.setBackgroundVisible(False)
-    chart.setMargins(QMargins(4, 4, 4, 4))
-    chart.legend().setLabelColor(pal.color(QPalette.WindowText))
+    chart.setPlotAreaBackgroundVisible(False)
+    chart.setMargins(QMargins(0, 4, 0, 0))
+    chart.legend().setLabelColor(QColor(t["text_muted"]))
+    chart.legend().setFont(theme.font("caption"))
+    chart.legend().setMarkerShape(chart.legend().MarkerShape.MarkerShapeCircle)
     chart.setAnimationOptions(QChart.SeriesAnimations)
     for axis in chart.axes():
-        axis.setLabelsColor(pal.color(QPalette.WindowText))
-        axis.setGridLineColor(pal.color(QPalette.Mid))
-        axis.setLinePenColor(pal.color(QPalette.Mid))
+        axis.setLabelsColor(QColor(t["text_muted"]))
+        axis.setLabelsFont(theme.font("caption"))
+        axis.setGridLineColor(QColor(t["border"]))
+        axis.setLinePenColor(QColor(t["border_strong"]))
 
 
 class OverviewTab(QWidget):
@@ -35,23 +41,27 @@ class OverviewTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cards = {
-            "findings": KpiCard("Findings", "#546e7a"),
-            "devices": KpiCard("Affected devices", "#546e7a"),
-            "critical": KpiCard("Critical", SEVERITY_COLORS["critical"]),
-            "high": KpiCard("High", SEVERITY_COLORS["high"]),
-            "exploitable": KpiCard("Exploit available", "#6a1b9a"),
-            "max_vpr": KpiCard("Highest VPR", "#00838f"),
-            "hardware": KpiCard("Not covered / SW upgrade", "#4e342e"),
+            "findings": KpiCard("Findings", term="Severity"),
+            "devices": KpiCard("Affected devices"),
+            "critical": KpiCard("Critical", SEVERITY_COLORS["critical"], term="Severity"),
+            "high": KpiCard("High", SEVERITY_COLORS["high"], term="Severity"),
+            "exploitable": KpiCard("Exploit available", term="Exploit available"),
+            "max_vpr": KpiCard("Highest VPR", term="VPR"),
+            "hardware": KpiCard("Not covered / SW upgrade", term="Contract"),
         }
         cards_row = QHBoxLayout()
+        cards_row.setSpacing(12)
         for card in self.cards.values():
             cards_row.addWidget(card)
+        self.cards["critical"].clicked.connect(lambda: self.severity_activated.emit("critical"))
+        self.cards["high"].clicked.connect(lambda: self.severity_activated.emit("high"))
 
         self.sev_chart = QChartView()
         self.vendor_chart = QChartView()
         for view in (self.sev_chart, self.vendor_chart):
             view.setRenderHint(QPainter.Antialiasing)
             view.setMinimumHeight(240)
+            view.setStyleSheet("background: transparent; border: none;")
 
         self.devices_model = DataFrameModel()
         self.devices_view = make_table(self.devices_model, stretch_column="os")

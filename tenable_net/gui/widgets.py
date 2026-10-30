@@ -4,31 +4,34 @@ import html
 import traceback
 
 import pandas as pd
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFrame, QHeaderView, QLabel, QStyledItemDelegate, QTableView, QTextBrowser,
-    QVBoxLayout,
+    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QStyledItemDelegate, QTableView, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
+from tenable_net import glossary
+from tenable_net.gui import theme
 from tenable_net.gui.models import RAW_ROLE, display, is_true
-
-SEVERITY_COLORS = {
-    "critical": "#c62828",
-    "high": "#ef6c00",
-    "medium": "#f9a825",
-    "low": "#1e88e5",
-    "info": "#78909c",
-}
-SEVERITY_TEXT = {"medium": "#212121"}
+from tenable_net.gui.theme import SEVERITY_COLORS, SEVERITY_TEXT, severity_color  # noqa: F401 (re-exported)
 
 
-def severity_color(severity):
-    return QColor(SEVERITY_COLORS.get(str(severity), "#9e9e9e"))
+def dot_icon(hex_color, size=10):
+    """Small filled circle, e.g. a severity marker next to a checkbox label."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(hex_color))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(0, 0, size - 1, size - 1)
+    p.end()
+    return QIcon(pm)
 
 
 class SeverityDelegate(QStyledItemDelegate):
-    """Paints the severity column as a colored pill."""
+    """Paints the severity column as a soft tinted pill with dark ink (readable, not shouty)."""
 
     def paint(self, painter, option, index):
         sev = str(index.data(RAW_ROLE) or "")
@@ -41,21 +44,21 @@ class SeverityDelegate(QStyledItemDelegate):
             style.drawControl(style.ControlElement.CE_ItemViewItem, option, painter, option.widget)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(option.rect).adjusted(4, 4, -4, -4)
-        rect.setWidth(min(rect.width(), 72))
+        rect = QRectF(option.rect).adjusted(6, 6, -6, -6)
+        rect.setWidth(min(rect.width(), 70))
         path = QPainterPath()
-        path.addRoundedRect(rect, rect.height() / 2, rect.height() / 2)
-        painter.fillPath(path, severity_color(sev))
-        painter.setPen(QColor(SEVERITY_TEXT.get(sev, "#ffffff")))
-        font = painter.font()
-        font.setBold(True)
-        font.setPointSizeF(font.pointSizeF() * 0.85)
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, sev.upper())
+        path.addRoundedRect(rect, 5, 5)
+        painter.fillPath(path, QColor(theme.severity_tint(sev)))
+        painter.setPen(QColor(theme.severity_ink(sev)))
+        f = painter.font()
+        f.setWeight(f.Weight.DemiBold)
+        f.setPointSizeF(f.pointSizeF() * 0.92)
+        painter.setFont(f)
+        painter.drawText(rect, Qt.AlignCenter, sev.title())
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QSize(84, super().sizeHint(option, index).height())
+        return QSize(82, super().sizeHint(option, index).height())
 
 
 def make_table(model, stretch_column=None):
@@ -67,9 +70,12 @@ def make_table(model, stretch_column=None):
     view.setSelectionMode(QAbstractItemView.SingleSelection)
     view.setEditTriggers(QAbstractItemView.NoEditTriggers)
     view.setAlternatingRowColors(True)
+    view.setShowGrid(False)
     view.setWordWrap(False)
+    view.setFrameShape(QFrame.NoFrame)
     view.verticalHeader().setVisible(False)
-    view.verticalHeader().setDefaultSectionSize(26)
+    view.verticalHeader().setDefaultSectionSize(theme.row_height())
+    view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     view.horizontalHeader().setHighlightSections(False)
     view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     view.horizontalHeader().setStretchLastSection(stretch_column is None)
@@ -102,35 +108,158 @@ def fit_columns(view, max_width=360, caps=None):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 
 
-class KpiCard(QFrame):
-    def __init__(self, caption, accent="#546e7a", parent=None):
+class Sparkline(QWidget):
+    """Tiny line chart of recent values (e.g. criticals per pull)."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("KpiCard")
-        self.setStyleSheet(
-            f"#KpiCard {{ border: 1px solid palette(mid); border-left: 5px solid {accent};"
-            " border-radius: 6px; background: palette(base); }"
-        )
+        self.values = []
+        self.color = theme.color("brand")
+        self.setMinimumHeight(22)
+
+    def set_values(self, values, color=None):
+        self.values = [float(v) for v in values if v is not None]
+        if color is not None:
+            self.color = QColor(color)
+        self.setVisible(len(self.values) >= 2)
+        self.update()
+
+    def paintEvent(self, _event):
+        if len(self.values) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        lo, hi = min(self.values), max(self.values)
+        span = (hi - lo) or 1.0
+        w, h = self.width() - 4, self.height() - 4
+        step = w / (len(self.values) - 1)
+        points = [QPointF(2 + i * step, 2 + h - (v - lo) / span * h) for i, v in enumerate(self.values)]
+        path = QPainterPath(points[0])
+        for pt in points[1:]:
+            path.lineTo(pt)
+        p.setPen(QPen(self.color, 2))
+        p.drawPath(path)
+        p.setBrush(self.color)
+        p.drawEllipse(points[-1], 2.5, 2.5)
+
+
+class KpiCard(QFrame):
+    """Headline number: caption (with an optional colour dot), value, change vs. the previous pull and an
+    optional sparkline. All cards share one style; colour only appears in the small dot. Clickable."""
+
+    clicked = Signal()
+
+    def __init__(self, caption, accent=None, term=None, higher_is_bad=True, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Card")
+        self.accent = accent
+        self.higher_is_bad = higher_is_bad
+        self.setCursor(Qt.PointingHandCursor)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
+        self.caption = QLabel()
+        self.caption.setObjectName("CardCaption")
+        self.caption.setFont(theme.font("caption", bold=True))
+        self._caption_text = caption
         self.value = QLabel("–")
-        font = self.value.font()
-        font.setPointSizeF(font.pointSizeF() * 2.0)
-        font.setBold(True)
-        self.value.setFont(font)
-        self.caption = QLabel(caption)
-        self.caption.setStyleSheet("color: palette(placeholder-text);")
-        layout.addWidget(self.value)
+        self.value.setFont(theme.font("kpi", bold=True))
+        self.delta = QLabel()
+        self.delta.setObjectName("Muted")
+        self.delta.setFont(theme.font("caption"))
+        self.spark = Sparkline()
+        self.spark.setVisible(False)
         layout.addWidget(self.caption)
+        layout.addWidget(self.value)
+        layout.addWidget(self.delta)
+        layout.addWidget(self.spark)
+        self._render_caption()
+        tip = glossary.TERMS.get(term) if term else None
+        if tip:
+            self.setToolTip(f"<b>{term}</b><br>{tip}")
+
+    def _render_caption(self):
+        dot = (f"<span style='color:{self.accent}'>●</span>&nbsp;" if self.accent else "")
+        self.caption.setText(f"{dot}{html.escape(self._caption_text)}")
 
     def set_value(self, value):
         self.value.setText(value if isinstance(value, str) else f"{value:,}")
 
+    def set_delta(self, change, suffix="since last pull"):
+        """change: number vs. the previous pull (None hides it). Red when it moved the bad way."""
+        if change is None:
+            self.delta.setText("")
+            return
+        if change == 0:
+            self.delta.setText(f"No change {suffix}")
+            self.delta.setStyleSheet("")
+            return
+        worse = (change > 0) == self.higher_is_bad
+        arrow = "▲" if change > 0 else "▼"
+        color = theme.tokens()["bad" if worse else "good"]
+        self.delta.setText(f"<span style='color:{color}; font-weight:600'>{arrow} {abs(change):,}</span> {suffix}")
+
+    def set_trend(self, values):
+        self.spark.set_values(values, self.accent or theme.tokens()["brand"])
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class Chip(QLabel):
+    """Quiet status indicator: a coloured dot and a label inside a thin outline. Emits clicked."""
+
+    clicked = Signal()
+
+    def __init__(self, text="", status="neutral", parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("Chip")
+        self.setTextFormat(Qt.RichText)
+        self.status = status
+        self.set(text, status)
+
+    def set(self, text, status="neutral", tooltip=None):
+        self.status = status
+        t = theme.tokens()
+        # brighter dots: these sit on the dark sidebar
+        dot = {"good": "#5FCF7A", "warn": "#FFB547", "bad": "#FF6B6B"}.get(status, "#8F9EBF")
+        self.setText(f"<span style='color:{dot}'>●</span>&nbsp;{html.escape(text)}")
+        self.plain_text = text
+        if tooltip:
+            self.setToolTip(tooltip)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class Toast(QLabel):
+    """Brief message in the corner of its parent window."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("Toast")
+        self.setWordWrap(True)
+        self.setMaximumWidth(420)
+        self.hide()
+        self._timer = QTimer(self, singleShot=True)
+        self._timer.timeout.connect(self.hide)
+
+    def show_message(self, text, ms=6000):
+        self.setText(text)
+        self.adjustSize()
+        parent = self.parentWidget()
+        self.move(parent.width() - self.width() - 24, 84)  # top right, under the top bar
+        self.raise_()
+        self.show()
+        self._timer.start(ms)
+
 
 def _pill(sev):
-    color = SEVERITY_COLORS.get(sev, "#9e9e9e")
-    text = SEVERITY_TEXT.get(sev, "#ffffff")
-    return (f'<span style="background:{color}; color:{text}; font-weight:bold;">'
-            f'&nbsp;{html.escape(sev.upper())}&nbsp;</span>')
+    return theme.severity_badge(sev)
 
 
 class FindingDetail(QTextBrowser):

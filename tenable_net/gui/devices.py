@@ -10,8 +10,9 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QSplitt
 
 from tenable_net import reports
 from tenable_net.gui.findings import FindingsPanel
-from tenable_net.gui.models import STATUS_COLORS, DataFrameModel, MaskFilterProxy, display
-from tenable_net.gui.widgets import SEVERITY_COLORS, fit_columns, make_table
+from tenable_net.gui import theme
+from tenable_net.gui.models import DataFrameModel, MaskFilterProxy, display
+from tenable_net.gui.widgets import SEVERITY_COLORS, SEVERITY_TEXT, fit_columns, make_table
 from tenable_net.inventory import device_summary, has_lifecycle
 from tenable_net.normalize import vendor_of
 
@@ -181,11 +182,8 @@ class DevicesTab(QWidget):
         self.header.setText(self._header_html(device, len(rows)))
 
     def _header_html(self, device, n_findings):
-        badges = " ".join(
-            f'<span style="background:{SEVERITY_COLORS[s]}; color:{"#212121" if s == "medium" else "#fff"};">'
-            f"&nbsp;{int(device.get(s) or 0)} {s}&nbsp;</span>"
-            for s in ("critical", "high", "medium", "low")
-        )
+        badges = "&nbsp; ".join(theme.severity_badge(s, f"{int(device.get(s) or 0)} {s}")
+                                for s in ("critical", "high", "medium", "low"))
         bits = []
         if not device.get("in_tenable", True):
             bits.append("<b style='color:#c62828'>Not in Tenable (AKiPS only)</b>")
@@ -229,7 +227,7 @@ class DevicesTab(QWidget):
 
         def colored(value):
             value = text(value)
-            color = STATUS_COLORS.get(value)
+            color = theme.status_color(value)
             return f"<b style='color:{color}'>{html.escape(value)}</b>" if color else html.escape(value or "—")
 
         cells = "padding:1px 10px 1px 0; white-space:nowrap"

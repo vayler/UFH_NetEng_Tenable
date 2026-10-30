@@ -307,7 +307,7 @@ def test_diagnostics_window(app, inventory_cache, monkeypatch, tmp_path):
     w = MainWindow(inventory_cache)
     w.open_diagnostics()
     win = w.diagnostics_window
-    assert win.isVisible()
+    assert w.pages.currentWidget() is win and w.current_view() == "diagnostics"
     stages = list(win.stage_model.frame["stage"])
     assert stages[0] == "All devices" and "Not matched to AKiPS" in stages
 

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from tenable_net import reports
 from tenable_net.gui.filters import filter_mask
 from tenable_net.gui.models import DataFrameModel, MaskFilterProxy
-from tenable_net.gui.widgets import SEVERITY_COLORS, FindingDetail, fit_columns, make_table
+from tenable_net.gui.widgets import SEVERITY_COLORS, FindingDetail, dot_icon, fit_columns, make_table
 from tenable_net.normalize import SEVERITY_ORDER
 
 FINDING_TABLE_COLUMNS = [
@@ -83,11 +83,7 @@ class FindingsTab(QWidget):
         for sev in SEVERITY_ORDER:
             cb = QCheckBox(sev.title())
             cb.setChecked(True)
-            cb.setStyleSheet(
-                "QCheckBox::indicator { width: 13px; height: 13px; border-radius: 3px;"
-                f" border: 2px solid {SEVERITY_COLORS[sev]}; background: palette(base); }}"
-                f"QCheckBox::indicator:checked {{ background: {SEVERITY_COLORS[sev]}; }}"
-            )
+            cb.setIcon(dot_icon(SEVERITY_COLORS[sev]))
             cb.toggled.connect(self.apply_filters)
             sev_layout.addWidget(cb)
             self.sev_checks[sev] = cb
