@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from tenable_net import (
-    __version__, akips, cisco, client, export, glossary, history, inventory, normalize, reports, risk,
+    __version__, akips, cisco, client, export, glossary, history, inventory, normalize, remediation, reports, risk,
 )
 from tenable_net.gui import theme
 from tenable_net.gui.devices import DevicesTab
@@ -35,6 +35,7 @@ NAV = [
     ("overview", "Overview", "Overview", "Where the network stands right now"),
     ("findings", "Findings", "Findings", "Every vulnerability Tenable reports, with filters and details"),
     ("devices", "Devices", "Devices", "Risk, hardware and findings per device"),
+    ("remediation", "Remediation", "Remediation plan", "Fixes ranked by how much risk they remove"),
     ("trends", "Trends", "Trends", "How exposure is changing from pull to pull"),
     ("diagnostics", "Diagnostics", "Enrichment diagnostics", "Why devices are missing hardware or Cisco data"),
 ]
@@ -84,6 +85,7 @@ class MainWindow(QMainWindow):
         self.diagnostics_window = None
         self.trends_view = None
         self.changes, self.history_series = None, pd.DataFrame()
+        self.actions, self.action_members = pd.DataFrame(), {}
         self._cache_signature = None
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -145,7 +147,13 @@ class MainWindow(QMainWindow):
         self.overview.severity_activated.connect(lambda s: self.navigate("findings", severity=s))
         self.overview.view_requested.connect(lambda view, filters: self.navigate(view, **filters))
         self.pages = QStackedWidget()
-        self.views = {"overview": self.overview, "findings": self.findings_tab, "devices": self.devices_tab}
+        from tenable_net.gui.remediation import RemediationView
+
+        self.remediation_view = RemediationView()
+        self.remediation_view.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
+        self.overview.action_activated.connect(lambda a: self.navigate("remediation", action=a))
+        self.views = {"overview": self.overview, "findings": self.findings_tab, "devices": self.devices_tab,
+                      "remediation": self.remediation_view}
         self.view_keys = []
         for key, *_rest in NAV:
             page = self.views.get(key) or QWidget()  # lazily-built views start as placeholders
@@ -422,6 +430,8 @@ class MainWindow(QMainWindow):
         elif view == "devices" and filters.get("lifecycle"):
             page.search.clear()
             page.lifecycle_filter.setCurrentText(filters["lifecycle"])
+        elif view == "remediation" and filters.get("action"):
+            page.select_action(filters["action"])
         elif view == "diagnostics" and filters.get("stage"):
             page.select_stage(filters["stage"])
         return page
@@ -553,6 +563,10 @@ class MainWindow(QMainWindow):
             self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
             self.overview.set_data(findings, self.inventory)
             self.overview.set_history(self.changes, self.history_series)
+            self.actions, self.action_members = remediation.plan(findings, self.inventory)
+            self.overview.set_actions(self.actions)
+            self.remediation_view.set_data(self.actions, self.action_members,
+                                           findings.loc[findings["severity"].astype(str) != "info", "risk"].sum())
             self.findings_tab.set_data(findings)
             self.devices_tab.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
             self.devices_tab.history_dir = self.cache_dir
@@ -664,8 +678,8 @@ class MainWindow(QMainWindow):
         try:
             paths = reports.write_reports(self.findings.drop(columns=["vendor", "risk", "days_open", "change"],
                                                              errors="ignore"),
-                                          self.assets,
-                                          inventory=self.inventory)
+                                          self.assets, inventory=self.inventory,
+                                          plan=(self.actions, self.action_members))
         finally:
             QApplication.restoreOverrideCursor()
         folder = paths[0].parent.resolve()

@@ -35,6 +35,10 @@ TERMS = {
     "Fleet risk": "The average risk score of the riskiest quarter of devices, a single number for the network's "
                   "overall exposure.",
     "Time to fix": "Days from when Tenable first found a finding to the first pull where it was gone.",
+    "Priority": "Remediation ranking: risk removed divided by the square root of devices touched, so fixes "
+                "that close many severe findings on few devices come first.",
+    "Confidence": "For OS upgrades: Confirmed (fixed releases are at or below the target), Likely (Cisco "
+                  "suggests the target), Check (some fixes need a newer release), Find release (no target known).",
 }
 
 # Table column -> glossary term (used for header tooltips).
@@ -46,7 +50,7 @@ COLUMNS = {
     "contract": "Contract", "contract_end": "Contract", "sw_status": "Software status",
     "recommended_sw": "Cisco suggested", "lifecycle": "Lifecycle", "ldos": "LDoS", "end_of_sale": "End of sale",
     "orderable_pid": "Orderable PID", "model": "Model", "serial": "Serial", "serials": "Serial", "stage": "Stage",
-    "match_method": "Matched by", "change": "Change",
+    "match_method": "Matched by", "change": "Change", "priority": "Priority", "confidence": "Confidence",
 }
 
 

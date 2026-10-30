@@ -29,8 +29,11 @@ HEADERS = {
     "sys_descr": "sysDescr", "stage": "Stage", "reason": "Reason", "models": "Models", "chassis": "Chassis",
     "risk": "Risk", "risk_band": "Risk band", "days_open": "Days open", "top_finding": "Top finding",
     "change": "Change", "fixed": "Fixed", "mean_days": "Mean days", "median_days": "Median days",
+    "rank": "#", "type": "Type", "title": "Action", "confidence": "Confidence", "priority": "Priority",
+    "risk_removed": "Risk removed", "target": "Target", "running": "Running", "worst": "Worst",
+    "plugins": "Plugins",
 }
-STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage", "change")
+STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage", "change", "confidence")
 
 
 def _is_missing(value):

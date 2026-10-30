@@ -123,7 +123,7 @@ def by_device_with_hardware(findings, inventory=None):
     return devices.merge(hw, on="hostname", how="left")
 
 
-def write_reports(findings, assets=None, out_dir=None, xlsx=True, inventory=None):
+def write_reports(findings, assets=None, out_dir=None, xlsx=True, inventory=None, plan=None):
     """Write findings.csv and (optionally) a multi-sheet tenable_report.xlsx. Returns written paths."""
     out_dir = Path(out_dir or Path("output") / datetime.now().strftime("%Y-%m-%d_%H%M"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +140,15 @@ def write_reports(findings, assets=None, out_dir=None, xlsx=True, inventory=None
         sheets["Assets"] = assets
     if inventory is not None and not inventory.empty:
         sheets["Hardware & Lifecycle"] = inventory[[c for c in HARDWARE_COLUMNS if c in inventory]]
+    if plan is not None and not plan[0].empty:
+        from tenable_net.remediation import action_items
+
+        actions, members = plan
+        sheets["Remediation"] = actions.drop(columns=["detail"])
+        rows = [{"rank": a["rank"], "action": a["title"], **item}
+                for a in actions.to_dict("records")
+                for item in action_items(a, members.get(a["id"], pd.DataFrame())).to_dict("records")]
+        sheets["Remediation devices"] = pd.DataFrame(rows)
 
     written = []
     csv_path = out_dir / "findings.csv"

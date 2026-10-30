@@ -146,3 +146,17 @@ def test_history_in_the_ui(app, tmp_path, monkeypatch):
     trends = w.navigate("trends")
     assert w.current_view() == "trends" and "2 pulls" in trends.summary.text()
     w.close()
+
+
+def test_remediation_view(window):
+    view = window.navigate("remediation")
+    assert view.proxy.rowCount() == len(window.actions) > 0
+    frame = view.model.frame
+    first = frame.iloc[view.proxy.source_row(0)]
+    assert first["rank"] == 1  # rank order kept
+    view.type_filter.setCurrentText("Configuration")
+    assert all(frame.iloc[view.proxy.source_row(r)]["type"] == "Configuration" for r in range(view.proxy.rowCount()))
+    action_id = window.actions.iloc[1]["id"]
+    window.overview.action_activated.emit(action_id)
+    assert window.current_view() == "remediation" and view.current_action()["id"] == action_id
+    assert view.items_model.rowCount() > 0

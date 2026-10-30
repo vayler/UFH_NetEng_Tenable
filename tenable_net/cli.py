@@ -70,11 +70,28 @@ def cmd_summary(args):
     summaries.summary(findings, meta, top=args.top)
 
 
+def _plan(findings, inv):
+    from tenable_net import remediation, risk
+
+    scored = risk.add_finding_scores(findings.assign(vendor=findings["os"].map(normalize.vendor_of)))
+    return remediation.plan(scored, inv)
+
+
 def cmd_report(args):
     findings, assets, _ = _load(args)
     inv = inventory.load_inventory(args.cache_dir)
-    for path in reports.write_reports(findings, assets, out_dir=args.out, xlsx=not args.no_xlsx, inventory=inv):
+    plan = _plan(findings, inv) if not findings.empty else None
+    for path in reports.write_reports(findings, assets, out_dir=args.out, xlsx=not args.no_xlsx, inventory=inv,
+                                      plan=plan):
         summaries.console.print(f"[green]wrote[/green] {path}")
+
+
+def cmd_remediation(args):
+    findings, _assets, _meta = _load(args)
+    actions, _members = _plan(findings, inventory.load_inventory(args.cache_dir))
+    summaries.print_frame(actions, "Remediation plan (ranked by risk removed per device touched)",
+                          ["rank", "type", "title", "confidence", "devices", "findings", "critical", "high",
+                           "priority"], args.top)
 
 
 def cmd_inventory(args):
@@ -238,6 +255,10 @@ def build_parser():
     p = sub.add_parser("search", parents=[pull_opts, read_opts], help="devices affected by a CVE / plugin")
     p.add_argument("query", help="CVE ID, plugin ID, or text in the plugin name")
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("remediation", parents=[pull_opts, read_opts], help="ranked fix list (OS upgrades, config, hardware)")
+    p.add_argument("--top", type=int, default=25, help="actions to show")
+    p.set_defaults(func=cmd_remediation)
 
     p = sub.add_parser("gui", help="open the desktop app")
     p.set_defaults(func=cmd_gui)

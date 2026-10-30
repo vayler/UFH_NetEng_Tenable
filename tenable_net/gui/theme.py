@@ -58,6 +58,7 @@ STATUS_TOKENS = {
     "Past LDoS": "bad", "Not covered": "bad", "LDoS < 12 mo": "warn", "End of sale": "warn",
     "Upgrade suggested": "warn", "Covered": "good", "On suggested release": "good", "OK": "good",
     "New": "warn", "Reopened": "bad",
+    "Confirmed": "good", "Likely": "warn", "Check": "warn", "Find release": "neutral",
 }
 
 TYPE_SCALE = {"caption": 0.88, "body": 1.0, "section": 1.08, "title": 1.35, "kpi": 2.0, "brand": 1.25}

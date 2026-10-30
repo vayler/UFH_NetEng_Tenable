@@ -103,6 +103,7 @@ class OverviewTab(QWidget):
     plugin_activated = Signal(str)            # plugin id
     severity_activated = Signal(str)          # severity
     view_requested = Signal(str, dict)        # view name, navigate() filters
+    action_activated = Signal(str)            # remediation action id
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -211,6 +212,16 @@ class OverviewTab(QWidget):
         self.new_view.clicked.connect(self._new_clicked)
         cl.addWidget(self.new_view, 1)
         self.grid.addWidget(changes)
+
+        # 2c. top remediation actions
+        self.actions_model = DataFrameModel()
+        self.actions_view = make_table(self.actions_model, stretch_column="title")
+        self.actions_view.setSortingEnabled(False)
+        self.actions_view.setMinimumHeight(200)
+        self.actions_view.clicked.connect(self._action_clicked)
+        self.grid.addWidget(_section("Top actions", self.actions_view,
+                                     "The fixes that remove the most risk for the least work. Click one for the "
+                                     "devices involved."))
 
         # 3. highest-risk devices / vulnerabilities
         self.devices_model = DataFrameModel()
@@ -376,6 +387,16 @@ class OverviewTab(QWidget):
             self.changes_note.setText("History starts with this pull. After your next pull this shows which "
                                       "findings are new, fixed or reopened, and the cards show the change.")
             self.new_view.setVisible(False)
+
+    def set_actions(self, actions):
+        top = actions.head(5) if actions is not None else pd.DataFrame()
+        self.actions_model.set_frame(top, ["rank", "type", "title", "confidence", "devices", "critical", "high"])
+        fit_columns(self.actions_view, max_width=160)
+
+    def _action_clicked(self, index):
+        frame = self.actions_model.frame
+        if index.isValid() and index.row() < len(frame):
+            self.action_activated.emit(str(frame.iloc[index.row()]["id"]))
 
     def _new_clicked(self, index):
         frame = self.new_model.frame
