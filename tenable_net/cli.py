@@ -1,8 +1,11 @@
 """Command-line entrypoint: python -m tenable_net <command> ..."""
 
 import argparse
+import json
 import logging
 import sys
+
+import pandas as pd
 
 from tenable_net import akips, cisco, export, inventory, normalize, reports, summaries
 
@@ -100,6 +103,42 @@ def cmd_cisco_test(args):
                            "doesn't have via CISCO_APIS or Settings -> Cisco.")
 
 
+def cmd_enrichment_report(args):
+    from tenable_net import diagnostics
+
+    funnel, devices, unmatched = diagnostics.enrichment_report(args.cache_dir)
+    if args.bundle:
+        path = diagnostics.export_bundle(args.cache_dir, args.bundle, scrub=not args.no_scrub)
+        summaries.console.print(f"[green]wrote[/green] {path} ({'scrubbed' if not args.no_scrub else 'NOT scrubbed'})")
+    if args.csv:
+        frame = diagnostics.Scrubber(devices, unmatched).frame(devices) if args.scrub else devices
+        frame.to_csv(args.csv, index=False)
+        summaries.console.print(f"[green]wrote[/green] {args.csv}")
+    if args.device:
+        q = args.device.lower()
+        hits = devices[devices["hostname"].str.lower().str.contains(q, regex=False)
+                       | devices["akips_device"].fillna("").str.lower().str.contains(q, regex=False)]
+        for _, row in hits.iterrows():
+            summaries.console.print(f"\n[bold]{row['hostname']}[/bold]")
+            for col, value in row.items():
+                if col != "hostname" and value not in ("", None) and not (isinstance(value, float) and pd.isna(value)):
+                    summaries.console.print(f"  {col:15} {value}")
+        return
+    summaries.print_frame(pd.DataFrame(list(funnel.items()), columns=["step", "devices"]), "Enrichment funnel")
+    summaries.print_frame(diagnostics.stage_counts(devices), "Where devices stop (first failing stage)")
+    stuck = devices[devices["stage"] != "OK"]
+    summaries.print_frame(stuck, "Devices that aren't fully enriched",
+                          ["hostname", "stage", "reason", "vendor", "models", "match_method"], args.top)
+    if not unmatched.empty:
+        summaries.print_frame(unmatched, "AKiPS devices not matched to Tenable (alias candidates)",
+                              ["akips_device", "ip", "sys_name", "with_serial"], args.top)
+    run = diagnostics.last_run(args.cache_dir)
+    if run:
+        summaries.console.print(f"\nLast Cisco run {run.get('at')}: {json.dumps(run.get('sections'))}")
+        for err in run.get("errors") or []:
+            summaries.console.print(f"[red]  {err}[/red]")
+
+
 def cmd_cisco_refresh(args):
     inventory.refresh_cisco(args.cache_dir, cisco.get_client(), force=args.force, log=summaries.console.print)
     summaries.hardware(inventory.load_inventory(args.cache_dir), top=args.top)
@@ -168,6 +207,15 @@ def build_parser():
     p.add_argument("--serial", help="serial number to test contract lookup with (default: one from inventory)")
     p.add_argument("--pid", help="product ID to test software suggestions with (default: one from inventory)")
     p.set_defaults(func=cmd_cisco_test)
+
+    p = sub.add_parser("enrichment-report", help="why devices are missing hardware / Cisco data (diagnostics)")
+    p.add_argument("--device", help="show every diagnostic field for devices matching this name")
+    p.add_argument("--csv", help="write the per-device diagnostics to this CSV")
+    p.add_argument("--scrub", action="store_true", help="with --csv: replace hostnames, IPs and serials with tokens")
+    p.add_argument("--bundle", metavar="ZIP", help="write a shareable diagnostics zip (scrubbed by default)")
+    p.add_argument("--no-scrub", action="store_true", help="with --bundle: keep real hostnames/IPs/serials")
+    p.add_argument("--top", type=int, default=40, help="rows per table")
+    p.set_defaults(func=cmd_enrichment_report)
 
     p = sub.add_parser("cisco-refresh", help="re-query Cisco EoX + contract coverage for cached inventory")
     p.add_argument("--force", action="store_true", help="ignore the 7-day cache")

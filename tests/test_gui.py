@@ -294,3 +294,71 @@ def test_settings_cisco_api_choices(app, tmp_path, monkeypatch):
     page.choice_checks["software"].setChecked(False)
     dialog.save()
     assert "CISCO_APIS=sn2info" in (tmp_path / ".env").read_text()
+
+
+def test_diagnostics_window(app, inventory_cache, monkeypatch, tmp_path):
+    from tenable_net import akips, cisco
+    from tenable_net.gui import diagnostics_window as dw
+
+    monkeypatch.chdir(inventory_cache)
+    monkeypatch.delenv("CISCO_APIS", raising=False)
+    for key in ("CISCO_CLIENT_ID", "CISCO_CLIENT_SECRET", "AKIPS_URL"):  # buttons need configured services
+        monkeypatch.setenv(key, "test")
+    w = MainWindow(inventory_cache)
+    w.open_diagnostics()
+    win = w.diagnostics_window
+    assert win.isVisible()
+    stages = list(win.stage_model.frame["stage"])
+    assert stages[0] == "All devices" and "Not matched to AKiPS" in stages
+
+    # clicking a stage filters the device list and shows the hint
+    row = stages.index("Not matched to AKiPS")
+    win.stage_view.selectRow(row)
+    assert win.device_proxy.rowCount() == 2
+    assert "device_aliases.csv" in win.hint.text()
+    assert "Not matched" in win.detail.toPlainText()
+    win.stage_view.selectRow(0)
+    assert win.device_proxy.rowCount() == len(win.devices)
+    win.search.setText("core-sw-01")
+    assert win.device_proxy.rowCount() == 1
+
+    # raw AKiPS dump and per-device Cisco re-query run on the worker thread
+    class FakeAkips:
+        def device_dump(self, device):
+            return f"{device} 1000 ENTITY-MIB.entPhysicalSerialNum = FOC2401X0AA\n{device} sys ip4addr = 10.0.0.1\n"
+
+    monkeypatch.setattr(akips, "get_client", lambda *a, **k: FakeAkips())
+    win.show_raw()
+    wait_until(app, lambda: "look relevant" in win.raw.toPlainText())
+    assert "entPhysicalSerialNum" in win.raw.toPlainText()
+
+    calls = []
+
+    class FakeCisco:
+        item_errors = {}
+
+        def coverage(self, serials):
+            calls.append(serials)
+            return {s: {"covered": True} for s in serials}
+
+        def software(self, pids):
+            return {p: {"releases": [{"release": "17.12.4", "suggested": True}]} for p in pids}
+
+    monkeypatch.setattr(cisco, "get_client", lambda *a, **k: FakeCisco())
+    win.requery()
+    wait_until(app, lambda: calls and win.requery_button.isEnabled())
+    assert sorted(calls[0]) == ["FOC2401X0AA", "FOC2401X0BB"]
+
+    monkeypatch.setattr(dw.QFileDialog, "getSaveFileName", lambda *a, **k: (str(tmp_path / "d.csv"), ""))
+    win.export_csv()
+    assert (tmp_path / "d.csv").read_text().startswith("hostname")
+    win.close()
+    w.close()
+
+
+def test_devices_header_shows_enrichment_reason(app, inventory_cache, monkeypatch):
+    monkeypatch.chdir(inventory_cache)
+    w = MainWindow(inventory_cache)
+    assert w.devices_tab.select_device("core-sw-02")
+    assert "Enrichment:" in w.devices_tab.header.text()
+    w.close()

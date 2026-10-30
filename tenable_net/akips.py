@@ -23,6 +23,13 @@ SYS_COMMANDS = {
     "ip": "mget text * sys ip4addr",
     "sys_descr": "mget text * sys SNMPv2-MIB.sysDescr",
 }
+# Queried too, but tolerated if AKiPS doesn't hold them: they improve matching / chassis detection.
+OPTIONAL_SYS_COMMANDS = {
+    "sys_name": "mget text * sys SNMPv2-MIB.sysName",
+}
+OPTIONAL_ENTITY_ATTRS = {
+    "contained_in": "ENTITY-MIB.entPhysicalContainedIn",
+}
 ENTITY_ATTRS = {
     "class": "ENTITY-MIB.entPhysicalClass",
     "name": "ENTITY-MIB.entPhysicalName",
@@ -39,7 +46,8 @@ DEVICE_SERIAL_ATTRS = [
 ]
 LINE_RE = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)\s*=\s?(.*)$")
 CHASSIS_RE = re.compile(r"^\s*(chassis|3)\b|\(3\)", re.I)
-# Used when a device reports no entPhysicalClass at all: names that denote a chassis / stack member.
+STACK_RE = re.compile(r"^\s*(stack|11)\b|\(11\)", re.I)
+# Used when a device reports no usable entPhysicalClass: names that denote a chassis / stack member.
 CHASSIS_NAME_RE = re.compile(r"^\s*(chassis|switch\s*\d+|stack\s*member\s*\d+|\d+)\s*$", re.I)
 PLACEHOLDER_SERIALS = {"", "n/a", "na", "none", "unknown", "0", "-"}
 MEMBER_RE = re.compile(r"(?:switch|member|chassis|slot)\s*(\d+)", re.I)
@@ -60,54 +68,74 @@ def _clean_serial(value):
     return "" if value.lower() in PLACEHOLDER_SERIALS else value
 
 
+def _has_data(ent):
+    return bool(_clean_serial(ent.get("serial")) or (ent.get("model") or "").strip())
+
+
 def _chassis_entities(entities):
-    """Pick the chassis entities of one device: by entPhysicalClass when the device reports it,
-    otherwise by name ("Switch 2", "Chassis", "1"), otherwise the lowest-index entity with a model."""
-    if any(ent.get("class") for _child, ent in entities):
-        return [(c, e) for c, e in entities if CHASSIS_RE.search(e.get("class", ""))]
-    named = [(c, e) for c, e in entities if CHASSIS_NAME_RE.match(e.get("name", "")) and (e.get("model") or e.get("serial"))]
+    """Pick the chassis entities of one device and say which rule found them.
+
+    1. entPhysicalClass = chassis
+    2. top-level entities (entPhysicalContainedIn = 0) and members of a stack container
+    3. names like "Switch 2", "Chassis", "1"
+    4. the lowest-index entity that has a serial or model
+    A device is never dropped just because its classes are unusual.
+    """
+    chassis = [(c, e) for c, e in entities if CHASSIS_RE.search(e.get("class", ""))]
+    if any(_has_data(e) for _c, e in chassis):
+        return chassis, "class=chassis"
+    if any((e.get("contained_in") or "").strip() for _c, e in entities):
+        stacks = {c for c, e in entities if STACK_RE.search(e.get("class", ""))}
+        picked = [(c, e) for c, e in entities
+                  if c not in stacks and _has_data(e)
+                  and ((e.get("contained_in") or "").strip() == "0" or (e.get("contained_in") or "").strip() in stacks)]
+        if picked:
+            return picked, "top-level (containedIn)"
+    named = [(c, e) for c, e in entities if CHASSIS_NAME_RE.match(e.get("name", "")) and _has_data(e)]
     if named:
-        return named
-    with_model = sorted(((c, e) for c, e in entities if e.get("model")), key=lambda ce: _child_sort_key(ce[0]))
-    return with_model[:1]
+        return named, "name"
+    with_data = sorted(((c, e) for c, e in entities if _has_data(e)), key=lambda ce: _child_sort_key(ce[0]))
+    return with_data[:1], ("first entity with serial/model" if with_data else "none")
 
 
-def chassis_rows(sys_lines, entity_lines):
-    """Combine sys + ENTITY-MIB values into one row per chassis (standalone box or stack member)."""
+def parse_inventory(sys_lines, entity_lines):
+    """Rows (one per chassis / stack member) plus one diagnostic record per AKiPS device."""
     sys_info = defaultdict(dict)
     for device, _child, attr, value in sys_lines:
         if attr.endswith("ip4addr"):
             sys_info[device]["ip"] = value
         elif attr.endswith("sysDescr"):
             sys_info[device]["sys_descr"] = value
+        elif attr.endswith("sysName"):
+            sys_info[device]["sys_name"] = value
         elif any(attr.endswith(a.split(".")[-1]) for a in DEVICE_SERIAL_ATTRS) and _clean_serial(value):
             sys_info[device].setdefault("serial", _clean_serial(value))
 
-    attr_key = {v: k for k, v in ENTITY_ATTRS.items()}
+    attr_key = {v: k for k, v in {**ENTITY_ATTRS, **OPTIONAL_ENTITY_ATTRS}.items()}
     per_device = defaultdict(dict)
     for device, child, attr, value in entity_lines:
         key = attr_key.get(attr) or next((k for a, k in attr_key.items() if attr.endswith(a.split(".")[-1])), None)
         if key:
             per_device[device].setdefault(child, {})[key] = value
 
-    rows = []
-    for device, children in per_device.items():
-        entries = []
-        for child, ent in _chassis_entities(list(children.items())):
-            serial = _clean_serial(ent.get("serial"))
-            if serial or ent.get("model"):
-                entries.append((child, ent, serial))
-        entries.sort(key=lambda e: _child_sort_key(e[0]))
-        # Device-level serial (chassisId etc.) fills a single chassis that has none.
-        device_serial = sys_info[device].get("serial")
-        if device_serial and len(entries) == 1 and not entries[0][2]:
+    rows, devices = [], []
+    for device in sorted(set(sys_info) | set(per_device)):
+        info, children = sys_info[device], per_device.get(device, {})
+        picked, rule = _chassis_entities(list(children.items())) if children else ([], "none")
+        entries = sorted(((c, e, _clean_serial(e.get("serial"))) for c, e in picked if _has_data(e)),
+                         key=lambda e: _child_sort_key(e[0]))
+        device_serial = info.get("serial")
+        if device_serial and not entries:  # chassis-level serial only: still worth a row
+            entries, rule = [("sys", {}, device_serial)], "device-level serial"
+        elif device_serial and len(entries) == 1 and not entries[0][2]:
             entries[0] = (entries[0][0], entries[0][1], device_serial)
         for ordinal, (child, ent, serial) in enumerate(entries, start=1):
             m = MEMBER_RE.search(ent.get("name", "") or ent.get("descr", ""))
             rows.append({
                 "akips_device": device,
-                "ip": sys_info[device].get("ip"),
-                "sys_descr": sys_info[device].get("sys_descr"),
+                "ip": info.get("ip"),
+                "sys_name": info.get("sys_name"),
+                "sys_descr": info.get("sys_descr"),
                 "descr": (ent.get("descr") or "").strip(),
                 "entity_index": child,
                 "member": int(m.group(1)) if m else ordinal,
@@ -116,15 +144,48 @@ def chassis_rows(sys_lines, entity_lines):
                 "serial": serial,
                 "sw_version": (ent.get("sw_version") or "").strip(),
             })
-    return rows
+        with_serial = sum(1 for e in entries if e[2])
+        if not children and not device_serial:
+            issue = "AKiPS has no ENTITY-MIB (hardware) data for this device"
+        elif not entries:
+            issue = "no chassis entity with a model or serial"
+        elif not with_serial:
+            issue = "AKiPS returned no serial number"
+        else:
+            issue = ""
+        devices.append({
+            "akips_device": device,
+            "ip": info.get("ip"),
+            "sys_name": info.get("sys_name"),
+            "sys_descr": info.get("sys_descr"),
+            "entities": len(children),
+            "classes": ", ".join(sorted({(e.get("class") or "").strip() for e in children.values()} - {""}))[:120],
+            "chassis_rule": rule,
+            "chassis": len(entries),
+            "with_model": sum(1 for e in entries if (e[1].get("model") or "").strip()),
+            "with_serial": with_serial,
+            "device_serial": device_serial or "",
+            "issue": issue,
+        })
+    return rows, devices
+
+
+def chassis_rows(sys_lines, entity_lines):
+    """Combine sys + ENTITY-MIB values into one row per chassis (standalone box or stack member)."""
+    return parse_inventory(sys_lines, entity_lines)[0]
+
+
+def inventory_from_raw(raw):
+    """(rows, per-device diagnostics) from {command: raw mget text}."""
+    sys_lines, entity_lines = [], []
+    for cmd, text in raw.items():
+        (entity_lines if "entPhysical" in cmd else sys_lines).extend(parse_mget(text))
+    return parse_inventory(sys_lines, entity_lines)
 
 
 def rows_from_raw(raw):
     """Chassis rows from {command: raw mget text}, as returned by AkipsClient.raw_responses()."""
-    sys_lines, entity_lines = [], []
-    for cmd, text in raw.items():
-        (entity_lines if "entPhysical" in cmd else sys_lines).extend(parse_mget(text))
-    return chassis_rows(sys_lines, entity_lines)
+    return inventory_from_raw(raw)[0]
 
 
 def _child_sort_key(child):
@@ -155,6 +216,8 @@ class AkipsClient:
         log = log or (lambda msg: None)
         cmds = list(SYS_COMMANDS.values()) + [f"mget text * * {attr}" for attr in ENTITY_ATTRS.values()]
         raw = {cmd: self.query(cmd) for cmd in cmds}
+        for cmd in list(OPTIONAL_SYS_COMMANDS.values()) + [f"mget text * * {a}" for a in OPTIONAL_ENTITY_ATTRS.values()]:
+            raw[cmd] = self._optional(cmd)
         serial_cmd = f"mget text * * {ENTITY_ATTRS['serial']}"
         if not parse_mget(raw[serial_cmd]):
             log("  AKiPS returned no ENTITY-MIB serial numbers; trying a pattern match on the attribute name.")

@@ -136,6 +136,38 @@ In the app:
 
 ### Troubleshooting enrichment
 
+**Tools → Enrichment diagnostics** shows where each device falls out of the AKiPS → Cisco pipeline:
+
+- **Funnel:** Tenable devices → with hardware inventory → with a model → with a serial → identified as Cisco → fully enriched. It also shows the result of the last Cisco run (sent / found / rejected per API).
+- **Where devices stop:** each device's first failing stage, with a plain-English reason and what to do. Click a stage to list its devices.
+
+  | Stage | Meaning |
+  |---|---|
+  | **Not matched to AKiPS** | Name and IP differ; add an alias, see below. |
+  | **AKiPS: no hardware data** | AKiPS isn't collecting ENTITY-MIB for the device. |
+  | **AKiPS: no chassis found** | AKiPS has hardware data, but nothing that looks like a chassis with a model or serial. |
+  | **No serial number** | Neither AKiPS nor Tenable reported a serial. |
+  | **Not Cisco** | The device wasn't sent to Cisco. |
+  | **Cisco: error** | Cisco rejected the lookup, for example a serial not entitled to your contracts. The error code is shown. |
+  | **Cisco: no contract record** | Serial Number to Info returned nothing for the serial. |
+  | **Software: no suggestion** | Software Suggestion had no release for the model. |
+  | **Not looked up yet** | The device hasn't been sent to Cisco yet. |
+- **Per-device buttons:**
+  - **Show raw AKiPS data** lists everything AKiPS holds for the device, with the serial and entPhysical lines on top.
+  - **Re-query Cisco for this device** refreshes just that device.
+- **Unmatched AKiPS devices** lists AKiPS devices that matched nothing in Tenable. These are the candidates for aliases.
+- **Export shareable report…** writes a zip of the diagnostics with hostnames, IPs and serials replaced by tokens, which is safe to send for help. **Export CSV…** writes the full table.
+
+The command-line equivalent is `python -m tenable_net enrichment-report`. Add `--device NAME` for one device, `--csv FILE`, or `--bundle report.zip`.
+
+**Aliases.** When an AKiPS device and its Tenable device share neither an IP nor a name or sysName, copy `device_aliases.example.csv` to `device_aliases.csv` next to `.env`. Add one `akips_device,tenable_hostname` line per device; the right side can be a hostname or an IP. `update.bat` never touches this file.
+
+**How matching and merging work:**
+- **Matching** tries an alias first, then any of the device's IPs in Tenable, then the AKiPS sysName, then the AKiPS device name.
+- **Merging:** a blank serial, model or software version from AKiPS is filled from Tenable's plugin output for the same stack member.
+- **Chassis detection:** AKiPS chassis are found by class, then by top-level / stack membership (`entPhysicalContainedIn`), then by name. A device with a chassis-level serial but no hardware table still gets a row.
+- **Rejected values:** a serial or model that Cisco rejects only fails itself, not the rest of its batch. Errors are retried after a day.
+
 Start with **Settings → Cisco → Test connection**, or `python -m tenable_net cisco-test`. It checks each piece separately:
 
 | Check | What a failure means |

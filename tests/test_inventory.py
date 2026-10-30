@@ -191,12 +191,12 @@ def test_cisco_client_batches_and_retries(monkeypatch):
     session = FakeSession([FakeResponse(429, headers={"Retry-After": "0"}), FakeResponse(200, cov),
                            FakeResponse(200, {"serial_numbers": []})])
     client = cisco.CiscoClient("id", "secret", session=session)
-    serials = [f"S{i}" for i in range(80)]  # > 75 -> two batches
+    serials = [f"SER{i}" for i in range(80)]  # > 75 -> two batches
     out = client.coverage(serials)
     assert out["FOC2401X0AA"]["covered"] is True
     assert len(session.get_urls) == 3 and session.posts == 1
-    assert session.get_urls[1].endswith(",".join(serials[:75]))
-    assert session.get_urls[2].endswith("S75,S76,S77,S78,S79")
+    assert f"/serial_numbers/{','.join(serials[:75])}?page_index=1" in session.get_urls[1]
+    assert "/serial_numbers/SER75,SER76,SER77,SER78,SER79?page_index=1" in session.get_urls[2]
 
 
 def test_cisco_client_eox_pagination():
@@ -237,15 +237,15 @@ ALL_APIS = {"sn2info", "software", "eox"}
 def test_cisco_refresh_uses_cache_ttl(tmp_path):
     fake = CountingCisco()
     apis = {"sn2info", "eox"}
-    cisco.refresh(fake, ["s1", "S2"], ["PID1"], tmp_path, apis=apis)
-    assert ("coverage", ["S1", "S2"]) in fake.calls
+    cisco.refresh(fake, ["sn001", "SN002"], ["PID1"], tmp_path, apis=apis)
+    assert ("coverage", ["SN001", "SN002"]) in fake.calls
     fake.calls.clear()
-    cisco.refresh(fake, ["S1", "S2", "S3"], ["PID1"], tmp_path, apis=apis)  # only the new serial is queried
-    assert fake.calls == [("coverage", ["S3"]), ("eox_serial", ["S3"])]
+    cisco.refresh(fake, ["SN001", "SN002", "SN003"], ["PID1"], tmp_path, apis=apis)  # only the new serial is queried
+    assert fake.calls == [("coverage", ["SN003"]), ("eox_serial", ["SN003"])]
     fake.calls.clear()
-    cisco.refresh(fake, ["S1"], [], tmp_path, force=True, apis=apis)
-    assert ("coverage", ["S1"]) in fake.calls
-    assert cisco.load_cache(tmp_path)["coverage"]["S1"]["covered"] is True
+    cisco.refresh(fake, ["SN001"], [], tmp_path, force=True, apis=apis)
+    assert ("coverage", ["SN001"]) in fake.calls
+    assert cisco.load_cache(tmp_path)["coverage"]["SN001"]["covered"] is True
 
 
 # ---- cache round trip --------------------------------------------------------------
@@ -364,9 +364,9 @@ def test_cisco_refresh_continues_after_one_api_fails(tmp_path):
     fake = PartlyEntitledCisco()
     logs = []
     with pytest.raises(cisco.CiscoApiError, match="EoX by serial"):
-        cisco.refresh(fake, ["S1"], ["C9300-48P"], tmp_path, log=logs.append, apis={"sn2info", "eox"})
+        cisco.refresh(fake, ["SN001"], ["C9300-48P"], tmp_path, log=logs.append, apis={"sn2info", "eox"})
     cache = cisco.load_cache(tmp_path)
-    assert cache["coverage"]["S1"]["covered"] is True          # saved despite the EoX failure
+    assert cache["coverage"]["SN001"]["covered"] is True          # saved despite the EoX failure
     assert ("eox_pid", ["C9300-48P", "C9300-48P-E"]) in fake.calls  # orderable PID from coverage looked up
     assert cache["eox_pid"]["C9300-48P-E"]["ldos"] == "2030-01-31"
     assert any("WARNING" in line for line in logs)
@@ -374,9 +374,9 @@ def test_cisco_refresh_continues_after_one_api_fails(tmp_path):
 
 def test_enrich_uses_orderable_pid():
     inv = pd.DataFrame([{"hostname": "h", "in_tenable": True, "akips_device": "h", "ip": "1", "vendor": "Cisco",
-                         "member": 1, "model": "C9300-48P", "serial": "S1", "sw_version": "", "source": "AKiPS"}])
-    cache = {"coverage": {"S1": {"covered": True, "orderable_pid": "C9300-48P-E"}},
-             "eox_serial": {"S1": {"eox_status": "No EoX announced"}},
+                         "member": 1, "model": "C9300-48P", "serial": "SN001", "sw_version": "", "source": "AKiPS"}])
+    cache = {"coverage": {"SN001": {"covered": True, "orderable_pid": "C9300-48P-E"}},
+             "eox_serial": {"SN001": {"eox_status": "No EoX announced"}},
              "eox_pid": {"C9300-48P": {"eox_status": "No EoX announced"},
                          "C9300-48P-E": {"ldos": "2025-01-31", "end_of_sale": "2020-01-31", "eox_status": "Announced"}}}
     row = inventory.enrich(inv, cache, TODAY).iloc[0]
@@ -387,11 +387,11 @@ def test_cisco_misses_retried_after_a_day(tmp_path):
     from datetime import datetime, timedelta, timezone
 
     old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
-    cisco.save_cache(tmp_path, {"coverage": {"S1": {"fetched_at": old}, "S2": {"covered": True, "fetched_at": old}},
+    cisco.save_cache(tmp_path, {"coverage": {"SN001": {"fetched_at": old}, "SN002": {"covered": True, "fetched_at": old}},
                                 "eox_serial": {}, "eox_pid": {}})
     fake = CountingCisco()
-    cisco.refresh(fake, ["S1", "S2"], [], tmp_path)
-    assert ("coverage", ["S1"]) in fake.calls  # the 2-day-old miss is retried; the hit is still fresh
+    cisco.refresh(fake, ["SN001", "SN002"], [], tmp_path)
+    assert ("coverage", ["SN001"]) in fake.calls  # the 2-day-old miss is retried; the hit is still fresh
 
 
 class DiagCisco(CountingCisco):
@@ -412,7 +412,7 @@ class DiagCisco(CountingCisco):
 
 
 def test_cisco_diagnose():
-    results = {key: (ok, detail) for key, _name, ok, detail in cisco.diagnose(DiagCisco(), serial="S1", pid="C9300-24T")}
+    results = {key: (ok, detail) for key, _name, ok, detail in cisco.diagnose(DiagCisco(), serial="SN001", pid="C9300-24T")}
     assert results["token"][0]
     assert results["sn2info"][0] is False and "403" in results["sn2info"][1]
     assert results["software"][0] and "C9300-24T: suggested 17.9.5" in results["software"][1]
@@ -482,8 +482,8 @@ def test_refresh_software_uses_models_and_base_pids(tmp_path):
             return {s: {"covered": True, "base_pid": "C9300-48P", "orderable_pid": "C9300-48P-E"} for s in serials}
 
     fake = Fake()
-    cisco.refresh(fake, ["S1"], ["WS-C2960X-48FPD-L"], tmp_path)  # default APIs: sn2info + software
-    assert ("software", ["C9300-48P", "WS-C2960X-48FPD-L"]) in fake.calls
+    cisco.refresh(fake, ["SN001"], ["WS-C2960X-48FPD-L"], tmp_path)  # default APIs: sn2info + software
+    assert ("software", ["C9300-48P", "C9300-48P-E", "WS-C2960X-48FPD-L"]) in fake.calls
     assert not any(call[0].startswith("eox") for call in fake.calls)
 
 
@@ -500,12 +500,12 @@ def test_enabled_apis(monkeypatch, tmp_path):
 def test_enrich_software_and_contract_fields():
     inv = pd.DataFrame([
         {"hostname": "h", "in_tenable": True, "akips_device": "h", "ip": "1", "vendor": "Cisco", "member": 1,
-         "model": "C9300-48P", "serial": "S1", "sw_version": "17.09.04a", "source": "AKiPS"},
+         "model": "C9300-48P", "serial": "SN001", "sw_version": "17.09.04a", "source": "AKiPS"},
         {"hostname": "h2", "in_tenable": True, "akips_device": "h2", "ip": "2", "vendor": "Cisco", "member": 1,
          "model": "C9300-48P", "serial": "", "sw_version": "17.9.5", "source": "AKiPS"},
     ])
     sw = cisco.parse_software(SOFTWARE_PAYLOAD, ["C9300-48P"])
-    cache = {"coverage": {"S1": {"covered": True, "contract_end": "2027-06-30", "contract_number": "12345",
+    cache = {"coverage": {"SN001": {"covered": True, "contract_end": "2027-06-30", "contract_number": "12345",
                                  "product_line_end": "2030-01-31", "base_pid": "C9300-48P"}},
              "eox_serial": {}, "eox_pid": {}, "software": sw}
     out = inventory.enrich(inv, cache, TODAY).set_index("hostname")

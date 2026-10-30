@@ -131,6 +131,10 @@ class MainWindow(QMainWindow):
             group.addAction(act)
             theme_menu.addAction(act)
 
+        tools_menu = self.menuBar().addMenu("&Tools")
+        self.diagnostics_action = tools_menu.addAction("Enrichment diagnostics…", self.open_diagnostics)
+        self.diagnostics_action.setToolTip("Why devices are missing hardware / Cisco data")
+
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction("About", lambda: QMessageBox.about(
             self, "About", f"<b>tenable_net</b> {__version__}<br>Tenable VM explorer for network equipment."))
@@ -177,12 +181,24 @@ class MainWindow(QMainWindow):
             self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
             self.overview.set_data(findings, self.inventory)
             self.findings_tab.set_data(findings)
-            self.devices_tab.set_data(findings, self.assets, self.inventory)
+            self.devices_tab.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
         finally:
             QApplication.restoreOverrideCursor()
         self.stack.setCurrentIndex(1)
         self.report_action.setEnabled(True)
         self._update_status()
+
+    def _enrichment_status(self, vulns, assets):
+        """{hostname: (stage, reason)} from the diagnostics report, for the Devices tab header."""
+        if self.inventory.empty:
+            return {}
+        try:
+            from tenable_net import diagnostics
+
+            _funnel, devices, _unmatched = diagnostics.enrichment_report(self.cache_dir, vulns, assets)
+        except Exception:  # noqa: BLE001 - diagnostics must never stop the app loading
+            return {}
+        return {r["hostname"]: (r["stage"], r["reason"]) for _, r in devices.iterrows()}
 
     def _update_status(self, *_):
         pulled = self.meta.get("pulled_at", "unknown")
@@ -206,6 +222,17 @@ class MainWindow(QMainWindow):
         if dialog.exec() and dialog.meta:
             self.reload()
             self.statusBar().showMessage("Pull complete.", 5000)
+
+    def open_diagnostics(self):
+        from tenable_net.gui.diagnostics_window import DiagnosticsWindow
+
+        if getattr(self, "diagnostics_window", None) is None:
+            self.diagnostics_window = DiagnosticsWindow(self.cache_dir, self)
+        else:
+            self.diagnostics_window.reload()
+        self.diagnostics_window.show()
+        self.diagnostics_window.raise_()
+        self.diagnostics_window.activateWindow()
 
     def open_settings(self):
         SettingsDialog(self, cache_dir=self.cache_dir).exec()

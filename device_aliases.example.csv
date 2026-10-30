@@ -1,0 +1,5 @@
+akips_device,tenable_hostname
+# One line per AKiPS device that does not match its Tenable device by IP, sysName or name.
+# Copy this file to device_aliases.csv (next to .env) and edit; the right side may be a hostname or IP.
+# FW-EDGE-A,fgt-01.net.example.edu
+# core-stack-2,10.0.4.4

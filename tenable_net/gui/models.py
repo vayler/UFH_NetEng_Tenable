@@ -22,7 +22,9 @@ HEADERS = {
     "total": "Total", "max_vpr": "Max VPR", "exploitable": "Exploitable", "findings": "Findings",
     "last_seen": "Last seen", "model": "Model", "lifecycle": "Lifecycle", "ldos": "LDoS",
     "contract": "Contract", "contract_end": "Contract ends", "sw_status": "Software",
-    "recommended_sw": "Cisco suggested", "sw_version": "Running",
+    "recommended_sw": "Cisco suggested", "sw_version": "Running", "akips_device": "AKiPS device",
+    "with_serial": "With serial", "match_method": "Matched by", "members": "Members", "sys_name": "sysName",
+    "sys_descr": "sysDescr", "stage": "Stage", "reason": "Reason", "models": "Models", "chassis": "Chassis",
 }
 # Text colors for hardware lifecycle / contract status cells (readable on light and dark backgrounds).
 STATUS_COLORS = {

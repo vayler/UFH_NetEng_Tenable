@@ -26,7 +26,10 @@ INVENTORY_PLUGINS = {
 
 INVENTORY_COLUMNS = [
     "hostname", "in_tenable", "akips_device", "ip", "vendor", "member", "model", "serial", "sw_version", "source",
+    "match_method", "vendor_source",
 ]
+ALIASES_FILE = "device_aliases.csv"
+GENERIC_VENDORS = {"Unknown", "Other", "Linux", "Windows"}
 CISCO_COLUMNS = [
     "contract", "contract_end", "contract_number", "service_level", "warranty_end", "product_line_end",
     "orderable_pid", "recommended_sw", "sw_status", "lifecycle", "end_of_sale", "end_of_sw_maint", "ldos",
@@ -156,51 +159,124 @@ def tenable_device_index(vulns, assets):
 # Cisco product-ID prefixes, for recognising Cisco hardware when sysDescr / OS don't say.
 CISCO_PID_RE = re.compile(
     r"^(WS-C|C9\d{2,3}|C8\d{2,3}|C[1-6]\d{3}|N[2-9]K-|N\d{2,4}-|ISR\d|ASR\d|CISCO\d|AIR-|IE-?\d|IR\d|"
-    r"CBS\d|SG\d{3}|FPR-?\d|ASA\d|ME-\d|NCS-?\d|CAT\d|CW9|C1000|C1300)", re.I)
+    r"CBS\d|SG\d{3}|FPR-?\d|ASA\d|ME-\d|NCS-?\d|CAT\d|CW9|C1000|C1300|UCS[A-Z]?-|SNS-\d|AIR-CT|C9800)", re.I)
 
 
 def looks_cisco(model):
     return bool(model) and bool(CISCO_PID_RE.match(str(model).strip()))
 
 
-def infer_vendor(*texts, model=""):
-    """First definite vendor from sysDescr / entPhysicalDescr / Tenable OS, else Cisco by PID shape."""
-    for text in texts:
+def infer_vendor_source(sources, model=""):
+    """(vendor, where it came from). sources: [(label, text)]. A definite network vendor from any text wins;
+    a Cisco-shaped model number beats generic answers like Linux/Windows (ISE, UCS, some WLCs)."""
+    generic = None
+    for label, text in sources:
         vendor = normalize.vendor_of(text)
-        if vendor not in ("Unknown", "Other"):
-            return vendor
-    return "Cisco" if looks_cisco(model) else "Unknown"
+        if vendor not in GENERIC_VENDORS:
+            return vendor, label
+        if vendor != "Unknown" and generic is None:
+            generic = (vendor, label)
+    if looks_cisco(model):
+        return "Cisco", "model number"
+    return generic or ("Unknown", "")
 
 
-def build_inventory(akips_rows, tenable_rows, device_index):
-    """Join sources into one row per chassis/stack member. AKiPS wins; Tenable fills gaps."""
-    by_ip, by_name, host_os = {}, {}, {}
-    for uuid, d in device_index.items():
-        for ip in d["ips"]:
-            by_ip.setdefault(ip, d["hostname"])
-        for name in d["names"]:
-            by_name.setdefault(name, d["hostname"])
-        if d.get("os"):
-            host_os.setdefault(d["hostname"], d["os"])
+def infer_vendor(*texts, model=""):
+    return infer_vendor_source([("text", t) for t in texts], model=model)[0]
+
+
+def aliases_path():
+    """device_aliases.csv lives next to .env (the project folder)."""
+    from tenable_net.client import env_path
+
+    return Path(env_path()).parent / ALIASES_FILE
+
+
+def load_aliases(path=None):
+    """{short AKiPS device name or sysName: Tenable hostname/IP} from device_aliases.csv (optional).
+
+    Columns: akips_device,tenable_hostname. Lines starting with # are ignored."""
+    path = Path(path) if path else aliases_path()
+    if not path.exists():
+        return {}
+    aliases = {}
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2 or not parts[0] or parts[0].startswith("#") or parts[0].lower() == "akips_device":
+            continue
+        aliases[_short(parts[0])] = parts[1]
+    return aliases
+
+
+class DeviceMatcher:
+    """Find the Tenable device for an AKiPS device: alias, then any IP, then sysName, then AKiPS name."""
+
+    def __init__(self, device_index, aliases=None):
+        self.by_ip, self.by_name, self.host_os = {}, {}, {}
+        for d in device_index.values():
+            for ip in d["ips"]:
+                self.by_ip.setdefault(ip, d["hostname"])
+            for name in d["names"] | {_short(d["hostname"])}:
+                self.by_name.setdefault(name, d["hostname"])
+            if d.get("os"):
+                self.host_os.setdefault(d["hostname"], d["os"])
+        self.aliases = aliases or {}
+
+    def match(self, akips_device, ip=None, sys_name=None):
+        for key in (_short(akips_device), _short(sys_name)):
+            target = self.aliases.get(key) if key else None
+            if target:
+                return self.by_ip.get(target) or self.by_name.get(_short(target)) or target, "alias"
+        if ip and ip in self.by_ip:
+            return self.by_ip[ip], "ip"
+        if sys_name and _short(sys_name) in self.by_name:
+            return self.by_name[_short(sys_name)], "sysName"
+        if _short(akips_device) in self.by_name:
+            return self.by_name[_short(akips_device)], "name"
+        return None, "none"
+
+
+def build_inventory(akips_rows, tenable_rows, device_index, aliases=None):
+    """Join sources into one row per chassis/stack member.
+
+    AKiPS rows win, but blank serial / model / software fields are filled from the matching Tenable
+    plugin row (same stack member), so a serial Tenable found is never thrown away."""
+    matcher = DeviceMatcher(device_index, aliases)
+    tenable_by_host = {}
+    for r in tenable_rows:
+        tenable_by_host.setdefault(r["hostname"], []).append(r)
 
     rows = []
     akips_hosts = set()
     for r in akips_rows:
-        host = by_ip.get(r.get("ip")) or by_name.get(_short(r.get("akips_device")))
+        host, method = matcher.match(r.get("akips_device"), r.get("ip"), r.get("sys_name"))
         if host:
             akips_hosts.add(host)
-        rows.append({
+        row = {
             "hostname": host or r.get("akips_device"),
             "in_tenable": bool(host),
             "akips_device": r.get("akips_device"),
             "ip": r.get("ip"),
-            "vendor": infer_vendor(r.get("sys_descr"), r.get("descr"), host_os.get(host), model=r.get("model")),
             "member": r.get("member"),
             "model": r.get("model") or "",
             "serial": r.get("serial") or "",
             "sw_version": r.get("sw_version") or "",
             "source": "AKiPS",
-        })
+            "match_method": method,
+        }
+        if host and not (row["serial"] and row["model"] and row["sw_version"]):
+            candidates = tenable_by_host.get(host, [])
+            same = [t for t in candidates if t.get("member") == row["member"]] or candidates[:1]
+            if same:
+                filled = [f for f in ("serial", "model", "sw_version") if not row[f] and same[0].get(f)]
+                for field in filled:
+                    row[field] = same[0][field]
+                if filled:
+                    row["source"] = f"AKiPS + Tenable {same[0].get('plugin_id')} ({', '.join(filled)})"
+        row["vendor"], row["vendor_source"] = infer_vendor_source(
+            [("sysDescr", r.get("sys_descr")), ("entPhysicalDescr", r.get("descr")),
+             ("Tenable OS", matcher.host_os.get(host))], model=row["model"])
+        rows.append(row)
 
     for r in tenable_rows:
         if r["hostname"] in akips_hosts:
@@ -216,6 +292,8 @@ def build_inventory(akips_rows, tenable_rows, device_index):
             "serial": r.get("serial") or "",
             "sw_version": r.get("sw_version") or "",
             "source": f"Tenable {r.get('plugin_id')}",
+            "match_method": "tenable",
+            "vendor_source": f"Tenable plugin {r.get('plugin_id')}",
         })
     df = pd.DataFrame(rows, columns=INVENTORY_COLUMNS)
     return df.sort_values(["hostname", "member"], na_position="last").reset_index(drop=True)
@@ -317,9 +395,10 @@ def enrich(inv, cisco_cache, today=None):
         dated = [c for c in eox_candidates if c.get("ldos") or c.get("end_of_sale")]
         eox = dated[0] if dated else next((c for c in eox_candidates if c.get("eox_status")), None)
 
-        sw_entry = next((sw_cache[k] for k in (model, base) if k and cisco.has_data(sw_cache.get(k))), None)
+        sw_keys = [k for k in (model, base, orderable) if k]
+        sw_entry = next((sw_cache[k] for k in sw_keys if cisco.has_data(sw_cache.get(k))), None)
         suggested = cisco.suggested_releases(sw_entry)
-        looked_up = any(k in sw_cache for k in (model, base) if k)
+        looked_up = any(k in sw_cache for k in sw_keys)
 
         if cov.get("covered") is True:
             contract = "Covered"
@@ -394,17 +473,19 @@ def device_summary(inv):
 
 # ---- cache + refresh ---------------------------------------------------------------
 
-def _write(cache_dir, name, rows):
+def _write(cache_dir, name, rows, **extra):
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    payload = {"fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rows": rows}
+    payload = {"fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rows": rows, **extra}
     (Path(cache_dir) / name).write_text(json.dumps(payload, default=str))
 
 
-def _read(cache_dir, name):
+def _read_payload(cache_dir, name):
     path = Path(cache_dir) / name
-    if not path.exists():
-        return [], None
-    payload = json.loads(path.read_text())
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _read(cache_dir, name):
+    payload = _read_payload(cache_dir, name)
     return payload.get("rows", []), payload.get("fetched_at")
 
 
@@ -461,8 +542,8 @@ def refresh(cache_dir, tio=None, akips_client=None, log=None, progress=None, can
     if akips_client is not None:
         log("Fetching hardware inventory from AKiPS ...")
         akips_raw = akips_client.raw_responses(log=log)
-        rows = akips.rows_from_raw(akips_raw)
-        _write(cache_dir, AKIPS_FILE, rows)
+        rows, devices = akips.inventory_from_raw(akips_raw)
+        _write(cache_dir, AKIPS_FILE, rows, devices=devices)
         summary["akips_chassis"] = len(rows)
         with_serial = sum(1 for r in rows if r["serial"])
         log(f"  AKiPS: {len(rows)} chassis/stack members on {len({r['akips_device'] for r in rows})} devices, "
@@ -501,7 +582,7 @@ def load_inventory(cache_dir, vulns=None, assets=None, today=None):
             vulns, assets, _ = export.load_cache(cache_dir)
         except FileNotFoundError:  # inventory pulled before any vuln pull
             vulns, assets = [], []
-    inv = build_inventory(akips_rows, tenable_rows, tenable_device_index(vulns, assets or []))
+    inv = build_inventory(akips_rows, tenable_rows, tenable_device_index(vulns, assets or []), load_aliases())
     return enrich(inv, cisco.load_cache(cache_dir), today)
 
 
@@ -517,6 +598,17 @@ def refresh_cisco(cache_dir, cisco_client, force=False, log=None):
     elif not serials and not pids:
         log("[yellow]WARNING: nothing to look up: no Cisco chassis with a model or serial number.[/yellow]")
     cisco.refresh(cisco_client, serials, pids, cache_dir, force=force, log=log, apis=cisco.enabled_apis())
+    return len(serials), len(pids)
+
+
+def refresh_cisco_device(cache_dir, cisco_client, hostname, log=None):
+    """Force a Cisco re-query for one device's serials and models (diagnostics button)."""
+    inv = load_inventory(cache_dir)
+    rows = inv[(inv["hostname"] == hostname) & (inv["vendor"] == "Cisco")] if not inv.empty else inv
+    serials, pids = cisco_keys(rows) if not rows.empty else ([], [])
+    log = log or (lambda msg: None)
+    log(f"Re-querying Cisco for {hostname}: {len(serials)} serial(s), {len(pids)} product ID(s)")
+    cisco.refresh(cisco_client, serials, pids, cache_dir, force=True, log=log, apis=cisco.enabled_apis())
     return len(serials), len(pids)
 
 

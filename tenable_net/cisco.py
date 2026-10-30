@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,7 +25,7 @@ DEFAULT_TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token"
 DEFAULT_API_BASE = "https://apix.cisco.com"
 EOX_SERIAL_PATH = "/supporttools/eox/rest/5/EOXBySerialNumber/{page}/{items}"
 EOX_PID_PATH = "/supporttools/eox/rest/5/EOXByProductID/{page}/{items}"
-COVERAGE_PATH = "/sn2info/v2/coverage/summary/serial_numbers/{items}"
+COVERAGE_PATH = "/sn2info/v2/coverage/summary/serial_numbers/{items}?page_index={page}"
 SOFTWARE_PATH = "/software/suggestion/v2/suggestions/releases/productIds/{items}?pageIndex={page}"
 EOX_BATCH = 20
 COVERAGE_BATCH = 75
@@ -48,7 +49,44 @@ def _batches(items, size):
 
 
 class CiscoApiError(RuntimeError):
-    """A Cisco Support API call failed or returned an error instead of data."""
+    """A Cisco Support API call failed or returned an error instead of data.
+
+    status is the HTTP status (None for an error payload in a 200 response)."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def fatal(self):
+        """Errors that splitting a batch can't fix: auth, entitlement, rate limiting, server trouble."""
+        return self.status in (401, 403, 429) or (self.status or 0) >= 500
+
+
+SERIAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{2,39}$")
+
+
+def valid_serial(serial):
+    """Cisco serials are letters/digits (occasionally a dash). Anything else would break the request."""
+    return bool(SERIAL_RE.match(str(serial or "").strip()))
+
+
+def _items(values):
+    """Comma-joined, URL-encoded path segment (PIDs like ISR4331/K9 contain a slash)."""
+    return ",".join(quote(str(v), safe="-._") for v in values)
+
+
+def _record_error(rec):
+    for key in ("ErrorResponse", "errorResponse", "error", "APIError"):
+        err = rec.get(key)
+        if err:
+            if isinstance(err, dict):
+                inner = err.get("APIError") or err
+                code = inner.get("ErrorCode") or inner.get("errorCode") or ""
+                desc = inner.get("ErrorDescription") or inner.get("errorDescription") or inner.get("message") or ""
+                return f"{code} {desc}".strip() or json.dumps(err)[:200]
+            return str(err)[:200]
+    return None
 
 
 def _error_message(payload):
@@ -95,6 +133,10 @@ def parse_coverage(payload):
         covered = str(rec.get("is_covered") or "").upper()
         pids = rec.get("orderable_pid_list") or []
         bases = rec.get("base_pid_list") or []
+        error = _record_error(rec)
+        if error:  # e.g. serial not found / not linked to your contracts
+            out[serial] = {"error": error}
+            continue
         out[serial] = {
             "covered": {"YES": True, "NO": False}.get(covered),
             "contract_end": rec.get("coverage_end_date") or None,
@@ -208,24 +250,44 @@ class CiscoClient:
                         403: " (this API isn't enabled for your Cisco API app / contract)",
                         404: " (endpoint not found; check CISCO_API_BASE)"}.get(resp.status_code, "")
                 raise CiscoApiError(f"HTTP {resp.status_code}{hint} for {path.split('/')[1]}: "
-                                    f"{getattr(resp, 'text', '')[:300]}")
+                                    f"{getattr(resp, 'text', '')[:300]}", status=resp.status_code)
             try:
                 return resp.json()
             except ValueError as exc:
                 raise CiscoApiError(f"non-JSON response for {path}: {getattr(resp, 'text', '')[:200]}") from exc
-        raise CiscoApiError(f"gave up on {path} after {retries} attempts (rate limited / server errors)")
+        raise CiscoApiError(f"gave up on {path} after {retries} attempts (rate limited / server errors)", status=429)
+
+    def _isolated(self, fetch_batch, batch):
+        """Run fetch_batch(batch). If Cisco rejects the batch because of one bad item, split it in
+        halves until only the offending items fail; their errors go to self.item_errors."""
+        try:
+            return fetch_batch(batch)
+        except CiscoApiError as exc:
+            if exc.fatal:
+                raise
+            if len(batch) == 1:
+                self.item_errors[str(batch[0]).upper()] = str(exc)[:200]
+                return {}
+            mid = len(batch) // 2
+            return {**self._isolated(fetch_batch, batch[:mid]), **self._isolated(fetch_batch, batch[mid:])}
+
+    def _run(self, values, size, fetch_batch):
+        self.item_errors = {}
+        out = {}
+        for batch in _batches(values, size):
+            out.update(self._isolated(fetch_batch, batch))
+        return out
 
     def _eox(self, path_template, values):
-        out = {}
-        for batch in _batches(values, EOX_BATCH):
-            items = ",".join(batch)
-            page, last = 1, 1
+        def fetch(batch):
+            out, page, last = {}, 1, 1
             while page <= last:
-                payload = self._get(path_template.format(page=page, items=items))
+                payload = self._get(path_template.format(page=page, items=_items(batch)))
                 out.update(parse_eox(payload))
                 last = int((payload.get("PaginationResponseRecord") or {}).get("LastIndex") or 1)
                 page += 1
-        return out
+            return out
+        return self._run(values, EOX_BATCH, fetch)
 
     def eox_by_serial(self, serials):
         return self._eox(EOX_SERIAL_PATH, serials)
@@ -234,33 +296,26 @@ class CiscoClient:
         return self._eox(EOX_PID_PATH, pids)
 
     def coverage(self, serials):
-        out = {}
-        for batch in _batches(serials, COVERAGE_BATCH):
-            out.update(parse_coverage(self._get(COVERAGE_PATH.format(items=",".join(batch)))))
-        return out
+        def fetch(batch):
+            out, page, last = {}, 1, 1
+            while page <= last:
+                payload = self._get(COVERAGE_PATH.format(items=_items(batch), page=page))
+                out.update(parse_coverage(payload))
+                pages = payload.get("pagination_response_record") or {}
+                last = int(pages.get("last_index") or 1)
+                page += 1
+            return out
+        return self._run(serials, COVERAGE_BATCH, fetch)
 
     def software(self, pids):
         """Suggested releases per product ID. One unknown PID can make Cisco reject a whole batch
-        (S3_INV_BASEPID), so a rejected batch is retried one PID at a time."""
-        out = {}
-        for batch in _batches(pids, SOFTWARE_BATCH):
-            try:
-                out.update(self._software_batch(batch))
-            except CiscoApiError as exc:
-                if str(exc).startswith("HTTP 4") or len(batch) == 1:
-                    raise
-                for pid in batch:
-                    try:
-                        out.update(self._software_batch([pid]))
-                    except CiscoApiError as single:
-                        if str(single).startswith("HTTP 4"):
-                            raise
-        return out
+        (S3_INV_BASEPID); _isolated narrows that down to the bad PID."""
+        return self._run(pids, SOFTWARE_BATCH, self._software_batch)
 
     def _software_batch(self, batch):
         out, page, last = {}, 1, 1
         while page <= last:
-            payload = self._get(SOFTWARE_PATH.format(items=",".join(batch), page=page))
+            payload = self._get(SOFTWARE_PATH.format(items=_items(batch), page=page))
             for pid, entry in parse_software(payload, batch).items():
                 out.setdefault(pid, {"product_name": entry["product_name"], "releases": []})["releases"] += entry["releases"]
             pages = payload.get("paginationResponseRecord") or {}
@@ -369,9 +424,10 @@ def _stale(entry, now, ttl_days):
 
 
 def has_data(entry):
-    """True if a cached result holds anything beyond its timestamp (False counts: "not covered")."""
+    """True if a cached result holds real data (False counts: "not covered"). Errors are not data,
+    so they're retried after MISS_TTL_DAYS like other misses."""
     return any(v is False or (v not in (None, "") and v != [] and v != {})
-               for k, v in (entry or {}).items() if k != "fetched_at")
+               for k, v in (entry or {}).items() if k not in ("fetched_at", "error"))
 
 
 def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DAYS, log=None, apis=None):
@@ -387,6 +443,7 @@ def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DA
         return keys if force else [k for k in keys if k not in cache[section] or _stale(cache[section][k], now, ttl_days)]
 
     errors = []
+    last_run = {"at": stamp, "apis": sorted(apis), "sections": {}, "errors": errors}
 
     def run(section, keys, fetch, label):
         if not keys:
@@ -398,14 +455,24 @@ def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DA
         except CiscoApiError as exc:  # keep going: another API may still be entitled
             log(f"[yellow]WARNING: Cisco {label} failed: {exc}[/yellow]")
             errors.append(f"{label}: {exc}")
+            last_run["sections"][section] = {"sent": len(keys), "found": 0, "failed": str(exc)[:300]}
             return
+        item_errors = getattr(cisco_client, "item_errors", None) or {}
         found = sum(1 for k in keys if has_data(results.get(k)))
-        log(f"    {found} of {len(keys)} returned data.")
+        rejected = sum(1 for k in keys if k in item_errors)
+        log(f"    {found} of {len(keys)} returned data" + (f", {rejected} rejected individually." if rejected else "."))
         for key in keys:  # record misses too; they are retried after MISS_TTL_DAYS
-            cache[section][key] = {**results.get(key, {}), "fetched_at": stamp}
+            entry = dict(results.get(key, {}))
+            if key in item_errors:
+                entry["error"] = item_errors[key]
+            cache[section][key] = {**entry, "fetched_at": stamp}
+        last_run["sections"][section] = {"sent": len(keys), "found": found, "rejected": rejected}
         save_cache(cache_dir, cache)
 
-    serials = {k.strip().upper() for k in serials if k and k.strip()}
+    raw_serials = {k.strip().upper() for k in serials if k and k.strip()}
+    serials = {k for k in raw_serials if valid_serial(k)}
+    if len(serials) < len(raw_serials):
+        log(f"  Skipping {len(raw_serials) - len(serials)} serial(s) that aren't valid Cisco serial numbers.")
     log(f"  Cisco APIs enabled: {', '.join(API_NAMES[a] for a in API_NAMES if a in apis) or 'none'}")
     if "sn2info" in apis:
         run("coverage", todo("coverage", serials), cisco_client.coverage, "contract coverage (Serial Number to Info)")
@@ -414,10 +481,12 @@ def refresh(cisco_client, serials, pids, cache_dir, force=False, ttl_days=TTL_DA
     base = {c.get("base_pid") for c in coverage} - {None, ""}
     orderable = {c.get("orderable_pid") for c in coverage} - {None, ""}
     if "software" in apis:
-        run("software", todo("software", set(pids) | base), cisco_client.software, "software suggestions")
+        run("software", todo("software", set(pids) | base | orderable), cisco_client.software, "software suggestions")
     if "eox" in apis:
         run("eox_serial", todo("eox_serial", serials), cisco_client.eox_by_serial, "EoX by serial")
         run("eox_pid", todo("eox_pid", set(pids) | orderable), cisco_client.eox_by_pid, "EoX by product ID")
+    cache["last_run"] = last_run
+    save_cache(cache_dir, cache)
     if errors:
         raise CiscoApiError(" | ".join(errors))
     return cache

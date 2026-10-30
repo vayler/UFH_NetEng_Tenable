@@ -72,6 +72,7 @@ class DevicesTab(QWidget):
         self.findings = pd.DataFrame()
         self.assets = pd.DataFrame()
         self.inventory = pd.DataFrame()
+        self.enrichment = {}
 
         self.search = QLineEdit(placeholderText="Filter devices (name, IP, model, serial)…", clearButtonEnabled=True)
         self.search.textChanged.connect(self._filter_devices)
@@ -117,7 +118,8 @@ class DevicesTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)
 
-    def set_data(self, findings, assets, inventory=None):
+    def set_data(self, findings, assets, inventory=None, enrichment=None):
+        self.enrichment = enrichment or {}
         self.findings = findings
         self.assets = assets
         self.inventory = inventory if inventory is not None else pd.DataFrame()
@@ -209,6 +211,15 @@ class DevicesTab(QWidget):
     def _hardware_html(self, hostname):
         if self.inventory.empty:
             return ""
+        stage, reason = self.enrichment.get(hostname, ("OK", ""))
+        note = ""
+        if stage not in ("OK", "Not Cisco"):
+            note = (f"<p style='color:#fb8c00'>Enrichment: <b>{html.escape(stage)}</b>"
+                    f"{' — ' + html.escape(reason) if reason else ''} "
+                    "<span style='color:gray'>(Tools → Enrichment diagnostics)</span></p>")
+        return note + self._hardware_table(hostname)
+
+    def _hardware_table(self, hostname):
         hw = self.inventory[self.inventory["hostname"] == hostname]
         if hw.empty:
             return "<p style='color:gray'>No hardware inventory for this device.</p>"
