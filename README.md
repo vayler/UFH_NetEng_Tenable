@@ -25,6 +25,16 @@ Nothing is installed into your system Python.
 
 Your API keys, the `cache\` folder and reports all live in the project folder next to `run_gui.bat`.
 
+### Updating
+
+Double-click **`update.bat`**. It checks GitHub for a newer version of `main`, shows the version number and the list of changes, and asks before installing. Then it offers to start the app. The next start of `run_gui.bat` installs any new requirements automatically.
+
+- **Downloaded as a ZIP?** The first run offers to link the folder to GitHub. After that, every update is one click. Program files are replaced with the latest version.
+- **Never touched:** your `.env`, `cache\`, reports, `logs\` and `.venv\`.
+- **Edited a program file yourself?** You can keep your change (it's set aside, the update is applied, then your change is re-applied), discard it, or cancel.
+- **Needs Git for Windows.** If it's missing, `update.bat` offers to install it with `winget`. The first fetch may open a browser so you can sign in to GitHub.
+- **Other branches:** `update.bat <branch>` follows a different branch.
+
 ## How it works
 
 1. **`pull`** uses Tenable's **bulk export API** (via the official [pyTenable](https://github.com/tenable/pyTenable) SDK). Tenable builds the dataset server-side in chunks, and pyTenable downloads them, polls for completion, and backs off on rate limits. This is much faster than paging through the UI.
