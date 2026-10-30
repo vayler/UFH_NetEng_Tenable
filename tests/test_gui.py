@@ -217,3 +217,21 @@ def test_devices_tab_hardware(app, inventory_cache):
 def test_hardware_card_hidden_without_inventory(window):
     assert not window.overview.cards["hardware"].isVisibleTo(window.overview)
     assert not window.devices_tab.lifecycle_filter.isVisibleTo(window.devices_tab)
+
+
+def test_crash_handler_logs_and_reports(app, tmp_path, monkeypatch):
+    import sys
+
+    from tenable_net.gui import app as app_module
+
+    shown = []
+    monkeypatch.setattr(app_module.QMessageBox, "critical", lambda *a: shown.append(a))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # restored after the test
+    log = tmp_path / "logs" / "gui-error.log"
+    hook = app_module.install_crash_handler(log)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        hook(*sys.exc_info())
+    assert "ValueError: boom" in log.read_text()
+    assert shown and "boom" in shown[0][2]

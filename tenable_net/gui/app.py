@@ -1,6 +1,7 @@
 """Main window and application entrypoint for the desktop app."""
 
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -246,7 +247,35 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+CRASH_LOG = Path("logs") / "gui-error.log"
+
+
+def install_crash_handler(log_path=CRASH_LOG):
+    """Log uncaught exceptions to a file and show them in a dialog.
+
+    The Windows launcher starts the app with pythonw, which has no console, so without this
+    an error would vanish silently.
+    """
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n{text}")
+        except OSError:
+            pass
+        if sys.stderr:  # None under pythonw
+            sys.__excepthook__(exc_type, exc, tb)
+        if QApplication.instance():
+            QMessageBox.critical(None, "Unexpected error",
+                                 f"{exc_type.__name__}: {exc}\n\nDetails were written to:\n{log_path.resolve()}")
+
+    sys.excepthook = hook
+    return hook
+
+
 def main(cache_dir=export.DEFAULT_CACHE_DIR):
+    install_crash_handler()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("tenable_net")
     app.setOrganizationName("UFH NetEng")
