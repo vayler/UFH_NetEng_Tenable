@@ -79,15 +79,31 @@ def score_finding(row, now=None):
 
 
 def add_finding_scores(findings, now=None):
-    """Return findings with 'risk' and 'days_open' columns added."""
+    """Return findings with 'risk' and 'days_open' columns added.
+
+    Vectorised equivalent of score_finding() (which explains single findings), so 100k findings score in
+    well under a second."""
+    import numpy as np
+
     df = findings.copy()
     if df.empty:
         df["risk"], df["days_open"] = pd.Series(dtype=float), pd.Series(dtype="Int64")
         return df
     now = now or datetime.now(timezone.utc)
-    records = df.to_dict("records")
-    df["risk"] = [score_finding(r, now)[0] for r in records]
-    df["days_open"] = pd.array([days_open(r.get("first_found"), now) for r in records], dtype="Int64")
+    scale = WEIGHTS["score_scale"]
+    vpr = pd.to_numeric(df.get("vpr"), errors="coerce")
+    cvss = pd.to_numeric(df.get("cvss3"), errors="coerce")
+    default = df["severity"].astype(str).map(WEIGHTS["severity_default"]).fillna(0.0).astype(float)
+    base = np.where(vpr.fillna(0) > 0, vpr * scale, np.where(cvss.fillna(0) > 0, cvss * scale, default))
+    base = pd.Series(base, index=df.index).astype(float)
+    exploit = df["exploit_available"].astype(str).str.lower().eq("true") if "exploit_available" in df else False
+    first = pd.to_datetime(df.get("first_found"), errors="coerce", utc=True)
+    age_days = ((pd.Timestamp(now) - first).dt.days).clip(lower=0)
+    age_points = (WEIGHTS["age_max_points"] * (age_days / WEIGHTS["age_full_days"]).clip(upper=1.0)).round(1)
+    age_points = age_points.where(age_points >= 0.1, 0.0).fillna(0.0)
+    score = base + np.where(exploit, WEIGHTS["exploit_points"], 0.0) + age_points
+    df["risk"] = score.where(base > 0, 0.0).clip(upper=100.0).round(1)
+    df["days_open"] = age_days.astype("Int64")
     return df
 
 
@@ -126,28 +142,37 @@ def device_scores(findings, hardware=None):
 
     findings must have a 'risk' column (add_finding_scores). hardware: inventory.device_summary() frame
     (optional) providing contract / lifecycle / sw_status per hostname."""
-    hw = {}
+    import numpy as np
+
+    cols = ["hostname", "risk", "risk_band", "top_finding", "top_risk", "scored_findings"]
+    scored = findings[findings["risk"] > 0].reset_index(drop=True) if not findings.empty else findings
+    if not scored.empty:
+        g = scored.groupby("hostname", sort=False)["risk"]
+        per = pd.DataFrame({"top_risk": g.max(), "total": g.sum(), "scored_findings": g.size()})
+        top_idx = scored.groupby("hostname", sort=False)["risk"].idxmax()
+        per["top_finding"] = scored.loc[top_idx.values, "plugin_name"].astype(str).values
+    else:
+        per = pd.DataFrame(columns=["top_risk", "total", "scored_findings", "top_finding"])
+    hosts = pd.Index(pd.unique(pd.concat([findings["hostname"].dropna() if not findings.empty else pd.Series(dtype=str),
+                                          hardware["hostname"] if hardware is not None and not hardware.empty
+                                          else pd.Series(dtype=str)])))
+    out = per.reindex(hosts)
+    out["top_risk"] = out["top_risk"].astype(float).fillna(0.0)
+    out["total"] = out["total"].astype(float).fillna(0.0)
+    out["scored_findings"] = out["scored_findings"].fillna(0).astype(int)
+    out["top_finding"] = out["top_finding"].fillna("")
+    rest = out["total"] - out["top_risk"]
+    score = out["top_risk"] * WEIGHTS["top_weight"] + WEIGHTS["others_max"] * (1 - np.exp(-rest / WEIGHTS["others_scale"]))
     if hardware is not None and not hardware.empty:
-        hw = {r["hostname"]: r for r in hardware.to_dict("records")}
-    hosts = list(dict.fromkeys(list(findings["hostname"].dropna()) + list(hw)))
-    by_host = {h: g for h, g in findings.groupby("hostname")} if not findings.empty else {}
-    rows = []
-    for host in hosts:
-        group = by_host.get(host)
-        scores = group["risk"].tolist() if group is not None else []
-        parts = _device_parts(scores, hw.get(host))
-        score = round(min(max(sum(p for _l, p in parts), 0.0), 100.0), 1)
-        top = group.sort_values("risk", ascending=False).iloc[0] if group is not None and len(group) else None
-        rows.append({
-            "hostname": host,
-            "risk": score,
-            "risk_band": band(score),
-            "top_finding": f"{top['plugin_name']}" if top is not None else "",
-            "top_risk": float(top["risk"]) if top is not None else 0.0,
-            "scored_findings": int(sum(1 for s in scores if s > 0)),
-        })
-    out = pd.DataFrame(rows, columns=["hostname", "risk", "risk_band", "top_finding", "top_risk", "scored_findings"])
-    return out.sort_values("risk", ascending=False).reset_index(drop=True)
+        hw = hardware.drop_duplicates("hostname").set_index("hostname").reindex(hosts)
+        for column in ("contract", "lifecycle", "sw_status"):
+            if column in hw:
+                points = hw[column].map(lambda v: WEIGHTS["hardware"].get(v, (None, 0.0))[1] if isinstance(v, str) else 0.0)
+                score = score + points.fillna(0.0).astype(float)
+    out["risk"] = score.clip(lower=0, upper=100).round(1)
+    out["risk_band"] = out["risk"].map(band)
+    out = out.reset_index(names="hostname")[cols]
+    return out.sort_values("risk", ascending=False, kind="stable").reset_index(drop=True)
 
 
 def explain_device(hostname, findings, hardware_row=None, now=None):

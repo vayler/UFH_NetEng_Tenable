@@ -84,6 +84,7 @@ class BandBar(QWidget):
             p.setPen(QColor(t["text_muted"]))
             p.drawText(QRectF(x + 14, 18, 140, 22), Qt.AlignVCenter, f"{b}  {self.counts.get(b, 0)}")
             x += 120
+        p.end()
 
 
 def _section(title, widget, subtitle=None):
@@ -121,11 +122,11 @@ class OverviewTab(QWidget):
         left = QVBoxLayout()
         cap = QLabel("FLEET RISK")
         cap.setObjectName("CardCaption")
-        cap.setFont(theme.font("caption", bold=True))
+        theme.set_font(cap, "caption", bold=True)
         cap.setToolTip("<b>Fleet risk</b><br>The average risk score (0-100) of the riskiest quarter of devices. "
                        "Device scores combine the worst finding, the rest of its findings and hardware status.")
         self.fleet_value = QLabel("–")
-        self.fleet_value.setFont(theme.font("kpi", bold=True))
+        theme.set_font(self.fleet_value, "kpi", bold=True)
         self.fleet_band = QLabel()
         left.addWidget(cap)
         left.addWidget(self.fleet_value)
@@ -135,7 +136,7 @@ class OverviewTab(QWidget):
         middle = QVBoxLayout()
         self.band_caption = QLabel()
         self.band_caption.setObjectName("CardCaption")
-        self.band_caption.setFont(theme.font("caption", bold=True))
+        theme.set_font(self.band_caption, "caption", bold=True)
         self.band_bar = BandBar()
         self.driver = QLabel()
         self.driver.setWordWrap(True)
@@ -166,9 +167,9 @@ class OverviewTab(QWidget):
         self.cards["exploitable"].clicked.connect(lambda: self.view_requested.emit("findings", {"exploitable": True}))
         self.cards["at_risk"].clicked.connect(lambda: self.view_requested.emit("devices", {}))
         self.cards["uncovered"].clicked.connect(
-            lambda: self.view_requested.emit("devices", {"lifecycle": "Not under contract"}))
+            lambda: self.view_requested.emit("hardware", {"filter": "Not under contract"}))
         self.cards["upgrade"].clicked.connect(
-            lambda: self.view_requested.emit("devices", {"lifecycle": "Software upgrade suggested"}))
+            lambda: self.view_requested.emit("hardware", {"filter": "Software upgrade suggested"}))
         self.grid.addLayout(cards_row)
 
         # 2b. what changed since the last pull
@@ -180,7 +181,7 @@ class OverviewTab(QWidget):
         stats = QVBoxLayout()
         self.changes_title = QLabel("SINCE LAST PULL")
         self.changes_title.setObjectName("CardCaption")
-        self.changes_title.setFont(theme.font("caption", bold=True))
+        theme.set_font(self.changes_title, "caption", bold=True)
         stats.addWidget(self.changes_title)
         self.change_stats = {}
         row = QHBoxLayout()
@@ -188,7 +189,7 @@ class OverviewTab(QWidget):
         for key, label in (("new", "New"), ("fixed", "Fixed"), ("reopened", "Reopened")):
             block = QVBoxLayout()
             value = QLabel("–")
-            value.setFont(theme.font("title", bold=True))
+            theme.set_font(value, "title", bold=True)
             caption = QLabel(label)
             caption.setObjectName("Muted")
             block.addWidget(value)

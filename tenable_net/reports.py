@@ -27,9 +27,10 @@ def by_device(df):
     if df.empty:
         return pd.DataFrame()
     counts = _severity_counts(df, ["hostname", "ip", "os"])
-    extra = df.groupby(["hostname", "ip", "os"], observed=True).agg(
+    flagged = df.assign(_exploit=df["exploit_available"].astype(str).str.lower().eq("true"))
+    extra = flagged.groupby(["hostname", "ip", "os"], observed=True).agg(
         max_vpr=("vpr", "max"),
-        exploitable=("exploit_available", lambda s: int((s == True).sum())),  # noqa: E712
+        exploitable=("_exploit", "sum"),
         last_found=("last_found", "max"),
     )
     out = counts.join(extra).reset_index()

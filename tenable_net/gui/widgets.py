@@ -115,6 +115,7 @@ def make_table(model, stretch_column=None):
     view.verticalHeader().setVisible(False)
     view.verticalHeader().setDefaultSectionSize(theme.row_height())
     view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    view.horizontalHeader().setResizeContentsPrecision(150)  # size columns from a sample, not every row
     view.horizontalHeader().setHighlightSections(False)
     view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     view.horizontalHeader().setStretchLastSection(stretch_column is None)
@@ -185,6 +186,7 @@ class Sparkline(QWidget):
         p.drawPath(path)
         p.setBrush(self.color)
         p.drawEllipse(points[-1], 2.5, 2.5)
+        p.end()
 
 
 class KpiCard(QFrame):
@@ -204,13 +206,13 @@ class KpiCard(QFrame):
         layout.setSpacing(4)
         self.caption = QLabel()
         self.caption.setObjectName("CardCaption")
-        self.caption.setFont(theme.font("caption", bold=True))
+        theme.set_font(self.caption, "caption", bold=True)
         self._caption_text = caption
         self.value = QLabel("–")
-        self.value.setFont(theme.font("kpi", bold=True))
+        theme.set_font(self.value, "kpi", bold=True)
         self.delta = QLabel()
         self.delta.setObjectName("Muted")
-        self.delta.setFont(theme.font("caption"))
+        theme.set_font(self.delta, "caption")
         self.spark = Sparkline()
         self.spark.setVisible(False)
         layout.addWidget(self.caption)

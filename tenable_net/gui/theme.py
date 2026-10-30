@@ -139,6 +139,25 @@ def font(role="body", bold=False):
     return f
 
 
+def set_font(widget, role="body", bold=False):
+    """Set a type-scale font and remember the role, so refresh_fonts() can rescale it later."""
+    widget.setProperty("font_role", role)
+    widget.setProperty("font_bold", bool(bold))
+    widget.setFont(font(role, bold))
+
+
+def refresh_fonts(root):
+    """Re-apply type-scale fonts and table row heights (after presentation mode toggles)."""
+    from PySide6.QtWidgets import QTableView, QWidget
+
+    for widget in [root, *root.findChildren(QWidget)]:
+        role = widget.property("font_role")
+        if role:
+            widget.setFont(font(role, bool(widget.property("font_bold"))))
+    for table in root.findChildren(QTableView):
+        table.verticalHeader().setDefaultSectionSize(row_height())
+
+
 # ---- contrast (WCAG) ----------------------------------------------------------------
 
 def _luminance(hex_color):

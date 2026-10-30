@@ -14,6 +14,7 @@ closes many severe findings on few devices comes first, without ignoring fleet-w
 
 import math
 import re
+from collections.abc import Mapping
 
 import pandas as pd
 
@@ -21,11 +22,11 @@ from tenable_net import risk
 from tenable_net.inventory import version_key
 
 OS_FAMILY_RE = re.compile(
-    r"\b(cisco|junos|juniper|palo alto|pan-os|fortinet|fortios|firewalls|f5|big-ip|arista|aruba|huawei|"
+    r"\b(?:cisco|junos|juniper|palo alto|pan-os|fortinet|fortios|firewalls|f5|big-ip|arista|aruba|huawei|"
     r"sonicwall|check ?point|mikrotik)\b", re.I)
 OS_NAME_RE = re.compile(
-    r"^(cisco (ios|ios xe|ios xr|nx-os|asa|firepower)|juniper junos|palo alto networks pan-os|fortinet fortios|"
-    r"arista (networks )?eos|aruba ?os|f5 networks big-ip)", re.I)
+    r"^(?:cisco (?:ios|ios xe|ios xr|nx-os|asa|firepower)|juniper junos|palo alto networks pan-os|fortinet fortios|"
+    r"arista (?:networks )?eos|aruba ?os|f5 networks big-ip)", re.I)
 FIXED_RE = re.compile(r"fixed (?:release|version|in)\s*[:=]?\s*([0-9][\w.()\-]*)", re.I)
 ACTION_COLUMNS = ["id", "type", "title", "target", "confidence", "devices", "findings", "critical", "high",
                   "risk_removed", "priority", "vendor", "detail"]
@@ -53,6 +54,31 @@ def _versions(values):
     return [seen[k] for k in sorted(seen)]
 
 
+class LazyFrames(Mapping):
+    """Action id -> member frame. Frames can be deferred and are built on first access: a plan has
+    thousands of configuration actions and building every member frame up front is slow."""
+
+    def __init__(self):
+        self._frames, self._makers = {}, {}
+
+    def put(self, key, frame):
+        self._frames[key] = frame
+
+    def defer(self, key, maker):
+        self._makers[key] = maker
+
+    def __getitem__(self, key):
+        if key not in self._frames:
+            self._frames[key] = self._makers.pop(key)()  # KeyError when unknown, as Mapping expects
+        return self._frames[key]
+
+    def __iter__(self):
+        return iter([*self._frames, *self._makers])
+
+    def __len__(self):
+        return len(self._frames) + len(self._makers)
+
+
 def _sev_counts(group):
     sev = group["severity"].astype(str)
     return int((sev == "critical").sum()), int((sev == "high").sum())
@@ -77,7 +103,7 @@ def plan(findings, inventory=None, device_risk=None):
                 "lifecycle": ", ".join(dict.fromkeys(c for c in g["lifecycle"] if c)),
                 "ldos": g["ldos"].min() if "ldos" in g else None,
             }
-    actions, members = [], {}
+    actions, members = [], LazyFrames()
 
     def add(kind, title, group, target="", confidence="", vendor="", detail="", risk_removed=None):
         aid = f"{kind[:2].upper()}{len(actions) + 1:03d}"
@@ -90,10 +116,16 @@ def plan(findings, inventory=None, device_risk=None):
             "critical": crit, "high": high, "risk_removed": round(removed, 1),
             "priority": round(removed / math.sqrt(max(devices, 1)), 1), "vendor": vendor, "detail": detail,
         })
-        members[aid] = group
+        members.put(aid, group)
 
     # 1. OS upgrades: vendor advisories grouped by vendor + model
-    os_mask = f.apply(is_os_advisory, axis=1) if not f.empty else pd.Series(dtype=bool)
+    if not f.empty:  # vectorised is_os_advisory()
+        family = f["plugin_family"].fillna("").astype(str)
+        os_mask = (f["plugin_name"].fillna("").astype(str).str.contains(OS_NAME_RE)
+                   | (family.str.lower().str.contains("local security checks") & family.str.contains(OS_FAMILY_RE))
+                   | family.str.upper().eq("CISCO"))
+    else:
+        os_mask = pd.Series(dtype=bool)
     os_findings = f[os_mask] if not f.empty else f
     if not os_findings.empty:
         os_findings = os_findings.assign(
@@ -118,14 +150,32 @@ def plan(findings, inventory=None, device_risk=None):
                       "Vendor OS advisories: pick a release that fixes all of them (see each finding's solution).")
             add("OS upgrade", title, g, target=target, confidence=confidence, vendor=str(vendor), detail=detail)
 
-    # 2. configuration / hardening, grouped by plugin
+    # 2. configuration / hardening, grouped by plugin (one vectorised aggregation, not a loop of small ones)
     rest = f[~os_mask] if not f.empty else f
-    for (pid, _name), g in rest.groupby(["plugin_id", "plugin_name"], sort=False) if not rest.empty else []:
-        first = g.iloc[0]
-        n = g["hostname"].nunique()
-        add("Configuration", f"Fix on {n} device{'s' if n != 1 else ''}: {first['plugin_name']}", g,
-            vendor=", ".join(sorted(set(g["vendor"].dropna())))[:60],
-            detail=str(first.get("solution") or "")[:600], confidence="")
+    if not rest.empty:
+        sev = rest["severity"].astype(str)
+        tagged = rest.assign(_crit=sev.eq("critical"), _high=sev.eq("high"))
+        groups = tagged.groupby(["plugin_id", "plugin_name"], sort=False, observed=True)
+        stats = groups.agg(devices=("hostname", "nunique"), findings=("hostname", "size"), critical=("_crit", "sum"),
+                           high=("_high", "sum"), risk_removed=("risk", "sum"), solution=("solution", "first"))
+        vendors = {}
+        for pid, name, vendor in rest[["plugin_id", "plugin_name", "vendor"]].dropna().drop_duplicates().itertuples(
+                index=False):
+            vendors.setdefault((pid, name), set()).add(vendor)
+        positions = groups.indices
+        for (pid, name), st in stats.iterrows():
+            aid = f"CO{len(actions) + 1:03d}"
+            n = int(st["devices"])
+            actions.append({
+                "id": aid, "type": "Configuration", "title": f"Fix on {n} device{'s' if n != 1 else ''}: {name}",
+                "target": "", "confidence": "", "devices": n, "findings": int(st["findings"]),
+                "critical": int(st["critical"]), "high": int(st["high"]),
+                "risk_removed": round(float(st["risk_removed"]), 1),
+                "priority": round(float(st["risk_removed"]) / math.sqrt(max(n, 1)), 1),
+                "vendor": ", ".join(sorted(vendors.get((pid, name), ())))[:60],
+                "detail": str(st["solution"] or "")[:600],
+            })
+            members.defer(aid, lambda rows=positions[(pid, name)]: rest.iloc[rows])
 
     # 3. hardware lifecycle / contracts
     hardware_points = {k: v[1] for k, v in risk.WEIGHTS["hardware"].items()}
@@ -162,8 +212,13 @@ def action_items(action, group):
         ip=("ip", "first"), model=("model", "first") if "model" in group else ("os", "first"),
         running=("running", "first") if "running" in group else ("os", "first"),
         findings=("plugin_id", "count"), worst=("severity", "min"), risk=("risk", "max"),
-        plugins=("plugin_id", lambda s: ", ".join(str(p) for p in sorted(set(s)))),
-        cves=("cves", lambda s: ", ".join(sorted({c for v in s.dropna() for c in str(v).split(", ") if c}))[:300]),
     ).reset_index()
+    plugins, cves = {}, {}  # plain dicts: a per-group lambda is slow on actions with thousands of devices
+    for host, pid, cve in zip(group["hostname"], group["plugin_id"], group["cves"]):
+        plugins.setdefault(host, set()).add(pid)
+        if isinstance(cve, str) and cve:
+            cves.setdefault(host, set()).update(c for c in cve.split(", ") if c)
+    agg["plugins"] = [", ".join(str(p) for p in sorted(plugins.get(h, ()))) for h in agg["hostname"]]
+    agg["cves"] = [", ".join(sorted(cves.get(h, ())))[:300] for h in agg["hostname"]]
     agg.insert(1, "target", action.get("target") or "")
     return agg.sort_values("risk", ascending=False).reset_index(drop=True)

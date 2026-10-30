@@ -147,6 +147,34 @@ class DataFrameModel(QAbstractTableModel):
     def column_index(self, name):
         return self._columns.index(name) if name in self._columns else -1
 
+    def sort_keys(self, column):
+        """A vectorised sort key for a column (severity by rank, text case-insensitive)."""
+        series = self._df[column]
+        if column == "severity":
+            return series.astype(str).map({s: i for i, s in enumerate(SEVERITY_ORDER)}).fillna(99)
+        if self._numeric[column]:
+            return series
+        return series.fillna("").astype(str).str.lower()
+
+    def sort_frame(self, column, order, on_permute=None):
+        """Sort the underlying frame in pandas (fast for 100k rows). on_permute(perm) is called with the new
+        order (old row positions) before views are told, so a filter mask can be permuted to match."""
+        if not 0 <= column < len(self._columns) or self._df.empty:
+            return None
+        keys = self.sort_keys(self._columns[column]).reset_index(drop=True)
+        ascending = order == Qt.AscendingOrder
+        perm = keys.sort_values(ascending=ascending, kind="stable", na_position="last").index.to_numpy()
+        if on_permute is not None:
+            on_permute(perm)
+        self.layoutAboutToBeChanged.emit()
+        self._df = self._df.iloc[perm].reset_index(drop=True)
+        self._values = {c: self._df[c].tolist() for c in self._columns}
+        self.layoutChanged.emit()
+        return perm
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        self.sort_frame(column, order)
+
 
 class MaskFilterProxy(QSortFilterProxyModel):
     """Sort/filter proxy whose row filter is a precomputed boolean mask (fast for large frames)."""
@@ -155,6 +183,19 @@ class MaskFilterProxy(QSortFilterProxyModel):
         super().__init__(parent)
         self._mask = None
         self.setSortRole(SORT_ROLE)
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        """Sort the source DataFrame instead of comparing rows one by one in Python."""
+        source = self.sourceModel()
+        if source is None or not hasattr(source, "sort_frame"):
+            return super().sort(column, order)
+
+        def permute(perm):
+            if self._mask is not None and len(self._mask) == len(perm):
+                self._mask = self._mask[perm]
+
+        source.sort_frame(column, order, on_permute=permute)
+        self.set_mask(self._mask)  # re-filter against the new row order
 
     def set_mask(self, mask):
         if hasattr(self, "beginFilterChange"):  # Qt 6.9+

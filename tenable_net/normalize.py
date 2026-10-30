@@ -4,6 +4,7 @@ Export fields vary by plugin and asset type, so every lookup is defensive.
 """
 
 import re
+from functools import lru_cache
 
 import pandas as pd
 
@@ -123,6 +124,7 @@ VENDOR_PATTERNS = [
 _VENDOR_RES = [(re.compile(rf"\b(?:{pattern})\b"), vendor) for pattern, vendor in VENDOR_PATTERNS]
 
 
+@lru_cache(maxsize=4096)  # a fleet has few distinct OS strings and this runs per finding
 def vendor_of(os_string):
     """Best-effort vendor bucket from an OS string, for network gear."""
     s = (os_string or "").lower()

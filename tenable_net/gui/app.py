@@ -14,8 +14,8 @@ import pandas as pd
 from PySide6.QtCore import QFileSystemWatcher, QSettings, QSize, QStringListModel, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
-    QApplication, QCompleter, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QApplication, QCompleter, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from tenable_net import (
@@ -29,6 +29,7 @@ from tenable_net.gui.overview import OverviewTab
 from tenable_net.gui.widgets import Chip, Toast
 
 APP_TITLE = "UF Health · Network Vulnerability Explorer"
+SIDEBAR_WIDTH = 224  # widened in presentation mode for the larger type
 
 # (key, sidebar label, page title, page subtitle). Pages are created in MainWindow._build_pages.
 NAV = [
@@ -36,10 +37,13 @@ NAV = [
     ("findings", "Findings", "Findings", "Every vulnerability Tenable reports, with filters and details"),
     ("devices", "Devices", "Devices", "Risk, hardware and findings per device"),
     ("remediation", "Remediation", "Remediation plan", "Fixes ranked by how much risk they remove"),
+    ("hardware", "Hardware & Contracts", "Hardware & contracts",
+     "Models, serials, software and Cisco contract status for every chassis"),
     ("trends", "Trends", "Trends", "How exposure is changing from pull to pull"),
     ("diagnostics", "Diagnostics", "Enrichment diagnostics", "Why devices are missing hardware or Cisco data"),
 ]
 NAV_INFO = {key: (title, subtitle) for key, _label, title, subtitle in NAV}
+PRESENT_VIEWS = ("overview", "trends", "remediation", "hardware")
 
 
 def apply_theme(app, mode_name):
@@ -87,6 +91,7 @@ class MainWindow(QMainWindow):
         self.changes, self.history_series = None, pd.DataFrame()
         self.actions, self.action_members = pd.DataFrame(), {}
         self._cache_signature = None
+        self._pending = {}  # view key -> loads the latest data into a view that hasn't been shown yet
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
 
@@ -138,22 +143,44 @@ class MainWindow(QMainWindow):
         self.reload()
 
     # ---- layout -----------------------------------------------------------------
+    # Views other than the one showing get their data on first use (navigation or attribute access),
+    # so opening a large dataset only pays for the Overview.
+    findings_tab = property(lambda self: self._ready("findings"))
+    devices_tab = property(lambda self: self._ready("devices"))
+    remediation_view = property(lambda self: self._ready("remediation"))
+    hardware_view = property(lambda self: self._ready("hardware"))
+
+    def _ready(self, key):
+        load = self._pending.pop(key, None)
+        if load is not None:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                load()
+            finally:
+                QApplication.restoreOverrideCursor()
+        return self.views[key]
+
+    def _defer(self, key, load):
+        self._pending[key] = load
+        if self.pages.currentWidget() is self.views[key]:
+            self._ready(key)
+
     def _build_pages(self):
+        from tenable_net.gui.hardware import HardwareView
+        from tenable_net.gui.remediation import RemediationView
+
         self.overview = OverviewTab()
-        self.findings_tab = FindingsTab()
-        self.devices_tab = DevicesTab()
+        self.views = {"overview": self.overview, "findings": FindingsTab(), "devices": DevicesTab(),
+                      "remediation": RemediationView(), "hardware": HardwareView()}
         self.overview.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
         self.overview.plugin_activated.connect(lambda p: self.navigate("findings", text=p))
         self.overview.severity_activated.connect(lambda s: self.navigate("findings", severity=s))
         self.overview.view_requested.connect(lambda view, filters: self.navigate(view, **filters))
         self.pages = QStackedWidget()
-        from tenable_net.gui.remediation import RemediationView
-
-        self.remediation_view = RemediationView()
         self.remediation_view.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
         self.overview.action_activated.connect(lambda a: self.navigate("remediation", action=a))
-        self.views = {"overview": self.overview, "findings": self.findings_tab, "devices": self.devices_tab,
-                      "remediation": self.remediation_view}
+        self.hardware_view.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
+        self.hardware_view.pull_requested.connect(self.pull)
         self.view_keys = []
         for key, *_rest in NAV:
             page = self.views.get(key) or QWidget()  # lazily-built views start as placeholders
@@ -173,7 +200,7 @@ class MainWindow(QMainWindow):
         titles.setSpacing(0)
         self.page_title = QLabel()
         self.page_title.setObjectName("PageTitle")
-        self.page_title.setFont(theme.font("title", bold=True))
+        theme.set_font(self.page_title, "title", bold=True)
         self.page_subtitle = QLabel()
         self.page_subtitle.setObjectName("PageSubtitle")
 
@@ -198,28 +225,35 @@ class MainWindow(QMainWindow):
         self.search_targets = {}
         layout.addWidget(self.global_search)
 
-        self.report_button = QPushButton("Export report")
-        self.report_button.clicked.connect(self.export_report)
-        pull = QPushButton("Pull from Tenable")
-        pull.setObjectName("Primary")
-        pull.clicked.connect(self.pull)
-        layout.addWidget(self.report_button)
-        layout.addWidget(pull)
+        self.report_button = QPushButton("Export")  # Qt draws the menu arrow
+        export_menu = QMenu(self.report_button)
+        export_menu.addAction("Excel report (all sheets)", self.export_report)
+        export_menu.addAction("Executive summary (PDF)…", self.export_summary)
+        export_menu.addAction("Current view as image (PNG)…", self.export_view_image)
+        self.report_button.setMenu(export_menu)
+        self.present_button = QPushButton("Present")
+        self.present_button.setToolTip("Presentation mode for meetings (F11): larger type, summary views only")
+        self.present_button.clicked.connect(self.toggle_presentation)
+        self.pull_button = QPushButton("Pull from Tenable")
+        self.pull_button.setObjectName("Primary")
+        self.pull_button.clicked.connect(self.pull)
+        for b in (self.report_button, self.present_button, self.pull_button):
+            layout.addWidget(b)
         return bar
 
     def _build_sidebar(self):
         """Navy sidebar: UF Health brand block, navigation, settings and version."""
-        sidebar = QFrame()
+        sidebar = self.sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(224)
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 18, 0, 12)
         layout.setSpacing(0)
         brand = QLabel("UF Health")
         brand.setObjectName("BrandName")
-        brand.setFont(theme.font("brand", bold=True))
+        theme.set_font(brand, "brand", bold=True)
         product = QLabel("Network Vulnerability Explorer")
-        product.setFont(theme.font("caption"))
+        theme.set_font(product, "caption")
         for widget in (brand, product):
             widget.setContentsMargins(20, 0, 12, 0)
         layout.addWidget(brand)
@@ -236,7 +270,7 @@ class MainWindow(QMainWindow):
         layout.addSpacing(22)
         caption = QLabel("VIEWS")
         caption.setObjectName("SidebarCaption")
-        caption.setFont(theme.font("caption", bold=True))
+        theme.set_font(caption, "caption", bold=True)
         caption.setContentsMargins(26, 0, 0, 6)
         layout.addWidget(caption)
 
@@ -257,7 +291,7 @@ class MainWindow(QMainWindow):
         # data freshness + source status: quiet dot + label rows; click for details
         sources = QLabel("DATA SOURCES")
         sources.setObjectName("SidebarCaption")
-        sources.setFont(theme.font("caption", bold=True))
+        theme.set_font(sources, "caption", bold=True)
         sources.setContentsMargins(26, 0, 0, 4)
         layout.addWidget(sources)
         self.fresh_chip = Chip("No data")
@@ -283,7 +317,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings)
         version = QLabel(f"Network Engineering · v{__version__}")
         version.setObjectName("SidebarVersion")
-        version.setFont(theme.font("caption"))
+        theme.set_font(version, "caption")
         version.setContentsMargins(26, 8, 0, 0)
         layout.addWidget(version)
         return sidebar
@@ -298,7 +332,7 @@ class MainWindow(QMainWindow):
         inner = QVBoxLayout(card)
         inner.setContentsMargins(28, 24, 28, 24)
         title = QLabel("Getting started")
-        title.setFont(theme.font("headline", bold=True))
+        theme.set_font(title, "headline", bold=True)
         self.checklist = QLabel()
         self.checklist.setTextFormat(Qt.RichText)
         self.checklist.setWordWrap(True)
@@ -325,6 +359,13 @@ class MainWindow(QMainWindow):
         self.reload_action.triggered.connect(self.reload)
         self.report_action = QAction("Export full report", self, shortcut=QKeySequence("Ctrl+E"))
         self.report_action.triggered.connect(self.export_report)
+        self.summary_action = QAction("Executive summary (PDF)…", self, shortcut=QKeySequence("Ctrl+Shift+E"))
+        self.summary_action.triggered.connect(self.export_summary)
+        self.image_action = QAction("Save current view as image…", self, shortcut=QKeySequence("Ctrl+Shift+S"))
+        self.image_action.triggered.connect(self.export_view_image)
+        self.present_action = QAction("Presentation mode", self, shortcut=QKeySequence("F11"), checkable=True)
+        self.present_action.triggered.connect(lambda _c: self.toggle_presentation())
+        self.addAction(self.present_action)
         self.settings_action = QAction("Settings…", self)
         self.settings_action.triggered.connect(self.open_settings)
         for text, keys, slot in (("Find", QKeySequence.Find, self.focus_search),
@@ -334,7 +375,8 @@ class MainWindow(QMainWindow):
             self.addAction(act)
 
         file_menu = self.menuBar().addMenu("&File")
-        for action in (self.pull_action, self.reload_action, self.report_action, self.settings_action):
+        for action in (self.pull_action, self.reload_action, self.report_action, self.summary_action,
+                       self.image_action, self.settings_action):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction("Quit", QKeySequence.Quit, self.close)
@@ -345,6 +387,7 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, k=key: self.navigate(k))
             view_menu.addAction(act)
         view_menu.addSeparator()
+        view_menu.addAction(self.present_action)
         theme_menu = view_menu.addMenu("Theme")
         group = QActionGroup(self)
         current = self.settings.value("theme", "system")
@@ -388,8 +431,8 @@ class MainWindow(QMainWindow):
         return page
 
     def _ensure_view(self, key):
-        """Build lazily-created views on first use."""
-        page = self.views[key]
+        """Build lazily-created views on first use, and load any data they haven't had yet."""
+        page = self._ready(key)
         if key == "diagnostics" and self.diagnostics_window is None:
             from tenable_net.gui.diagnostics_window import DiagnosticsWindow
 
@@ -430,6 +473,8 @@ class MainWindow(QMainWindow):
         elif view == "devices" and filters.get("lifecycle"):
             page.search.clear()
             page.lifecycle_filter.setCurrentText(filters["lifecycle"])
+        elif view == "hardware" and filters.get("filter"):
+            page.select_filter(filters["filter"])
         elif view == "remediation" and filters.get("action"):
             page.select_action(filters["action"])
         elif view == "diagnostics" and filters.get("stage"):
@@ -543,6 +588,7 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentIndex(0)
             self.report_action.setEnabled(False)
             self.report_button.setEnabled(False)
+            self.present_button.setEnabled(False)
             self.status_label.setText(f"No cached data in {self.cache_dir.resolve()}")
             self._update_header()
             return
@@ -551,13 +597,12 @@ class MainWindow(QMainWindow):
             findings = normalize.findings_frame(vulns, include_info=True)
             findings["vendor"] = findings["os"].map(normalize.vendor_of)
             findings = risk.add_finding_scores(findings)
-            self.changes, self.history_series = self._load_history()
+            self.changes, self.history_series = self._load_history(findings)
             labels = {}
             if self.changes:
                 labels.update({k: "New" for k in self.changes["new"]["key"]})
                 labels.update({k: "Reopened" for k in self.changes["reopened"]["key"]})
-            findings["change"] = [labels.get(history.finding_key(r), "") for r in
-                                  findings[["asset_uuid", "plugin_id", "port", "protocol"]].to_dict("records")]
+            findings["change"] = history.finding_keys(findings).map(labels).fillna("") if labels else ""
             self.findings = findings
             self.assets = normalize.assets_frame(assets)
             self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
@@ -565,11 +610,12 @@ class MainWindow(QMainWindow):
             self.overview.set_history(self.changes, self.history_series)
             self.actions, self.action_members = remediation.plan(findings, self.inventory)
             self.overview.set_actions(self.actions)
-            self.remediation_view.set_data(self.actions, self.action_members,
-                                           findings.loc[findings["severity"].astype(str) != "info", "risk"].sum())
-            self.findings_tab.set_data(findings)
-            self.devices_tab.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
-            self.devices_tab.history_dir = self.cache_dir
+            total_risk = findings.loc[findings["severity"].astype(str) != "info", "risk"].sum()
+            self._defer("remediation", lambda: self.views["remediation"].set_data(
+                self.actions, self.action_members, total_risk))
+            self._defer("findings", lambda: self.views["findings"].set_data(findings))
+            self._defer("devices", lambda: self._load_devices(findings, vulns, assets))
+            self._defer("hardware", lambda: self.views["hardware"].set_data(self.inventory))
             if self.trends_view is not None:
                 self.trends_view.reload()
             if self.diagnostics_window is not None:
@@ -580,13 +626,19 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
         self.report_action.setEnabled(True)
         self.report_button.setEnabled(True)
+        self.present_button.setEnabled(True)
         self._update_status()
         self._update_header()
 
-    def _load_history(self):
+    def _load_devices(self, findings, vulns, assets):
+        view = self.views["devices"]
+        view.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
+        view.history_dir = self.cache_dir
+
+    def _load_history(self, findings=None):
         """Make sure history exists (backfill on first run), then return (changes, series)."""
         try:
-            history.ensure_backfill(self.cache_dir)
+            history.ensure_backfill(self.cache_dir, findings=findings, meta=self.meta)
             return history.changes(self.cache_dir), history.series(self.cache_dir)
         except Exception:  # noqa: BLE001 - history is a bonus; never block loading
             return None, pd.DataFrame()
@@ -685,6 +737,115 @@ class MainWindow(QMainWindow):
         folder = paths[0].parent.resolve()
         self.notify(f"Report written to {folder}")
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    # ---- presentation + exports ----------------------------------------------------------
+    def toggle_presentation(self):
+        """Meeting mode: larger type, full screen, summary views only. F11 / Esc toggles back."""
+        self.presenting = not getattr(self, "presenting", False)
+        self.present_action.setChecked(self.presenting)
+        theme.apply(QApplication.instance(), self.settings.value("theme", "system"), presentation=self.presenting)
+        theme.refresh_fonts(self)
+        self.menuBar().setVisible(not self.presenting)
+        self.statusBar().setVisible(not self.presenting)
+        self.global_search.setVisible(not self.presenting)
+        self.pull_button.setVisible(not self.presenting)
+        self.present_button.setText("Exit presentation" if self.presenting else "Present")
+        self.sidebar.setFixedWidth(round(SIDEBAR_WIDTH * (1.2 if self.presenting else 1)))
+        for row in range(self.nav.count()):
+            key = self.nav.item(row).data(Qt.UserRole)
+            self.nav.item(row).setHidden(self.presenting and key not in PRESENT_VIEWS)
+        if self.presenting:
+            self._was_maximized = self.isMaximized()
+            if self.current_view() not in PRESENT_VIEWS:
+                self.navigate("overview")
+            self.showFullScreen()
+        else:
+            self.showMaximized() if getattr(self, "_was_maximized", False) else self.showNormal()
+        if not self.findings.empty:
+            self.reload()  # re-fit tables and charts to the new type scale
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and getattr(self, "presenting", False):
+            self.toggle_presentation()
+            return
+        super().keyPressEvent(event)
+
+    def export_view_image(self, path=None):
+        page = self.pages.currentWidget()
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Save view as image", f"{self.current_view()}.png", "PNG (*.png)")
+        if path:
+            page.grab().save(str(path))
+            self.notify(f"Saved {path}")
+        return path
+
+    def summary_data(self):
+        """Everything the executive summary needs, from the loaded data."""
+        fleet = risk.fleet_summary(self.overview.device_risk)
+        ch = self.changes
+        d = ch["deltas"] if ch else {}
+        sev = self.findings["severity"].astype(str) if not self.findings.empty else pd.Series(dtype=str)
+        kpis = [
+            ("Critical findings", f"{int((sev == 'critical').sum()):,}", d.get("critical"), True),
+            ("High findings", f"{int((sev == 'high').sum()):,}", d.get("high"), True),
+            ("Exploit available", f"{int((self.findings.get('exploit_available') == True).sum()):,}",  # noqa: E712
+             d.get("exploitable"), True),
+            ("Devices at Critical/High risk", f"{fleet['counts']['Critical'] + fleet['counts']['High']:,}",
+             (d.get("Critical", 0) + d.get("High", 0)) if ch else None, True),
+        ]
+        hw = None
+        if not self.inventory.empty:
+            c = self.inventory[self.inventory["vendor"] == "Cisco"]
+            soon = c["contract_end"].notna() & (c["contract_end"] <= pd.Timestamp.now() + pd.Timedelta(days=90))
+            hw = {"chassis": len(c), "covered": int((c["contract"] == "Covered").sum()),
+                  "uncovered": int((c["contract"] == "Not covered").sum()), "expiring": int(soon.sum()),
+                  "upgrade": int((c["sw_status"] == "Upgrade suggested").sum())}
+        images = {}
+
+        def snapshot(view):
+            """Render a chart at print size with animation off (a mid-animation grab has empty bars)."""
+            from PySide6.QtCharts import QChart, QDateTimeAxis
+
+            chart = view.chart()
+            chart.setAnimationOptions(QChart.NoAnimation)
+            for axis in chart.axes():
+                if isinstance(axis, QDateTimeAxis):
+                    axis.setTickCount(5)
+            old_size = view.size()
+            view.resize(480, 280)
+            QApplication.processEvents()
+            image = view.grab().toImage()
+            view.resize(old_size)
+            chart.setAnimationOptions(QChart.SeriesAnimations)
+            return image
+
+        images["severity"] = (snapshot(self.overview.sev_chart), "Findings by severity")
+        if len(history.list_snapshots(self.cache_dir)) >= 2:
+            tv = self.trends_view or self._ensure_view("trends")  # the real page, not a throwaway widget
+            images["trend"] = (snapshot(tv.open_chart), "Open findings over time")
+        return {"fleet": fleet, "kpis": kpis, "changes": ch, "actions": self.actions,
+                "devices": self.overview.device_risk, "hardware": hw, "images": images,
+                "pulled_at": str(self.meta.get("pulled_at", ""))[:16].replace("T", " "),
+                "driver": self.overview.driver.text()}
+
+    def export_summary(self, path=None):
+        from tenable_net.gui.executive_summary import render_pdf
+
+        if self.findings.empty:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Executive summary", "network_vulnerability_summary.pdf",
+                                                  "PDF (*.pdf)")
+        if not path:
+            return None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            render_pdf(path, self.summary_data())
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.notify(f"Executive summary saved to {path}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
+        return path
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

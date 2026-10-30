@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
-from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from tenable_net import export, inventory, normalize  # noqa: E402
@@ -93,6 +93,18 @@ def test_device_drilldown(window):
     assert window.devices_tab.select_device("dist-rtr-01")
     assert window.devices_tab.panel.proxy.rowCount() == 3
     assert "dist-rtr-01" in window.devices_tab.header.text()
+    # the finding shown first counts devices across the fleet, not just this device
+    tab = window.devices_tab
+    per_plugin = tab.findings.groupby("plugin_id")["hostname"].nunique()
+    checked = 0
+    for host in tab.findings["hostname"].unique():
+        tab.select_device(host)
+        shown = tab.panel.model.frame.iloc[tab.panel.proxy.source_row(0)]
+        fleet = int(per_plugin[shown["plugin_id"]])
+        if fleet > 1:
+            assert f"{fleet} devices in total" in tab.panel.detail.toPlainText()
+            checked += 1
+    assert checked
     assert window.devices_tab.select_device("oob-sw-09")  # asset without findings
     assert window.devices_tab.panel.proxy.rowCount() == 0
 
@@ -363,4 +375,63 @@ def test_devices_header_shows_enrichment_reason(app, inventory_cache, monkeypatc
     w = MainWindow(inventory_cache)
     assert w.devices_tab.select_device("core-sw-02")
     assert "Enrichment:" in w.devices_tab.header.text()
+    w.close()
+
+
+def test_hardware_view(app, inventory_cache, monkeypatch):
+    monkeypatch.chdir(inventory_cache)
+    w = MainWindow(inventory_cache)
+    view = w.navigate("hardware")
+    assert view.stack.currentIndex() == 1 and view.proxy.rowCount() == len(w.inventory)
+    assert view.cards["uncovered"].value.text() == "2"
+    view.select_filter("Not under contract")
+    assert view.proxy.rowCount() == 2
+    view.select_filter("All hardware")
+    view.search.setText("FOC2401X0BB")
+    assert view.proxy.rowCount() == 1
+    # the Overview card jumps here with the filter applied
+    w.overview.cards["uncovered"].clicked.emit()
+    assert w.current_view() == "hardware" and view.row_filter.currentText() == "Not under contract"
+    w.close()
+
+
+def test_hardware_view_empty_state(window):
+    view = window.navigate("hardware")
+    assert view.stack.currentIndex() == 0
+
+
+def test_presentation_mode_and_exports(app, cache_dir, tmp_path, monkeypatch):
+    from tenable_net.gui import theme
+
+    monkeypatch.chdir(cache_dir)
+    w = MainWindow(cache_dir)
+    w.navigate("findings")
+    w.toggle_presentation()
+    assert w.presenting and theme.presentation()
+    assert w.current_view() == "overview"  # findings isn't a presentation view
+    visible = [w.nav.item(i).data(Qt.UserRole) for i in range(w.nav.count()) if not w.nav.item(i).isHidden()]
+    assert set(visible) == {"overview", "trends", "remediation", "hardware"}
+    assert not w.menuBar().isVisible()
+    w.toggle_presentation()
+    assert not w.presenting and not theme.presentation()
+    assert all(not w.nav.item(i).isHidden() for i in range(w.nav.count()))
+
+    monkeypatch.setattr("tenable_net.gui.app.QDesktopServices.openUrl", lambda *_a: True)
+    pdf = w.export_summary(tmp_path / "summary.pdf")
+    assert pdf and (tmp_path / "summary.pdf").read_bytes()[:4] == b"%PDF"
+    png = w.export_view_image(str(tmp_path / "view.png"))
+    assert png and (tmp_path / "view.png").stat().st_size > 1000
+    w.close()
+
+
+def test_executive_summary_html(app, cache_dir, monkeypatch):
+    from tenable_net.gui.executive_summary import build_html
+
+    monkeypatch.chdir(cache_dir)
+    w = MainWindow(cache_dir)
+    data = w.summary_data()
+    data["images"] = {}
+    text = build_html(data)
+    assert "FLEET RISK" in text and "Top actions" in text and "Highest-risk devices" in text
+    assert "Critical findings" in text
     w.close()

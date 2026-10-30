@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from tenable_net import reports
-from tenable_net.gui.filters import filter_mask
+from tenable_net.gui.filters import filter_mask, search_index
 from tenable_net.gui.models import DataFrameModel, MaskFilterProxy
 from tenable_net.gui.widgets import SEVERITY_COLORS, FindingDetail, dot_icon, fit_columns, make_table
 from tenable_net.normalize import SEVERITY_ORDER
@@ -31,6 +31,7 @@ class FindingsPanel(QSplitter):
         self.proxy.setSourceModel(self.model)
         self.table = make_table(self.proxy, stretch_column="plugin_name")
         self.detail = FindingDetail()
+        self.fleet_counts = None  # {plugin_id: devices} to use instead of counting this panel's rows
         self.addWidget(self.table)
         self.addWidget(self.detail)
         self.setStretchFactor(0, 3)
@@ -44,7 +45,9 @@ class FindingsPanel(QSplitter):
             self.table.sortByColumn(self.model.column_index("risk"), Qt.DescendingOrder)
         else:
             self.table.sortByColumn(self.model.column_index("severity"), Qt.AscendingOrder)
-        if "plugin_id" in df and "hostname" in df and not df.empty:
+        if self.fleet_counts is not None:
+            self.detail.shared_counts = self.fleet_counts
+        elif "plugin_id" in df and "hostname" in df and not df.empty:
             self.detail.shared_counts = df.groupby("plugin_id")["hostname"].nunique().to_dict()
         fit_columns(self.table, max_width=200, caps={"cves": 150})
         self.detail.clear_detail()
@@ -111,7 +114,8 @@ class FindingsTab(QWidget):
         self.min_vpr.valueChanged.connect(self._debounce.start)
         self.exploitable = QCheckBox("Exploit available only")
         self.exploitable.toggled.connect(self.apply_filters)
-        self.changed = QCheckBox("New or reopened since last pull")
+        self.changed = QCheckBox("New or reopened only")
+        self.changed.setToolTip("Only findings that are new or reopened since the previous pull")
         self.changed.toggled.connect(self.apply_filters)
         form.addRow("Vendor", self.vendor)
         form.addRow("Min VPR", self.min_vpr)
@@ -152,6 +156,7 @@ class FindingsTab(QWidget):
         for sev, cb in self.sev_checks.items():
             cb.setText(f"{sev.title()}  ({counts.get(sev, 0):,})")
         self.panel.set_frame(findings)
+        search_index(self.panel.model.frame)  # build the search index now, not on the first keystroke
         self.apply_filters()
 
     def current_filters(self):

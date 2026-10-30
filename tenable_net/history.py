@@ -25,7 +25,17 @@ def _dir(cache_dir):
 
 
 def finding_key(row):
-    return f"{row.get('asset_uuid')}:{row.get('plugin_id')}:{row.get('port') or 0}/{row.get('protocol') or ''}"
+    port = row.get("port")
+    port = int(port) if port is not None and not pd.isna(port) else 0
+    proto = row.get("protocol")
+    proto = "" if proto is None or (isinstance(proto, float) and pd.isna(proto)) else proto
+    return f"{row.get('asset_uuid')}:{row.get('plugin_id')}:{port}/{proto}"
+
+
+def finding_keys(frame):
+    """Vectorised finding_key() for a findings frame."""
+    return (frame["asset_uuid"].astype(str) + ":" + frame["plugin_id"].astype(str) + ":"
+            + frame["port"].fillna(0).astype(int).astype(str) + "/" + frame["protocol"].fillna("").astype(str))
 
 
 def build_snapshot(findings, pulled_at, hardware=None):
@@ -33,14 +43,12 @@ def build_snapshot(findings, pulled_at, hardware=None):
     f = findings[(findings["severity"].astype(str) != "info") & (findings["state"] != "FIXED")]
     if "risk" not in f:
         f = risk.add_finding_scores(f)
-    items = {}
-    for r in f.to_dict("records"):
-        first = r.get("first_found")
-        items[finding_key(r)] = {
-            "s": str(r["severity"]), "h": r.get("hostname"), "p": r.get("plugin_id"), "n": r.get("plugin_name"),
-            "f": first.isoformat() if isinstance(first, pd.Timestamp) and not pd.isna(first) else None,
-            "r": float(r.get("risk") or 0),
-        }
+    keys = finding_keys(f)
+    first = pd.to_datetime(f["first_found"], errors="coerce", utc=True)
+    first_iso = [ts.isoformat() if not pd.isna(ts) else None for ts in first]
+    items = {k: {"s": sv, "h": h, "p": int(p) if pd.notna(p) else None, "n": n, "f": fi, "r": float(r or 0)}
+             for k, sv, h, p, n, fi, r in zip(keys, f["severity"].astype(str), f["hostname"], f["plugin_id"],
+                                              f["plugin_name"], first_iso, f["risk"])}
     devices = risk.device_scores(f, hardware)
     counts = f["severity"].astype(str).value_counts()
     return {
@@ -64,7 +72,7 @@ def _path_for(cache_dir, pulled_at):
 def save(cache_dir, snapshot):
     path = _path_for(cache_dir, snapshot["at"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
+    with gzip.open(path, "wt", encoding="utf-8", compresslevel=5) as fh:
         json.dump(snapshot, fh, separators=(",", ":"))
     prune(cache_dir)
     return path
@@ -86,24 +94,29 @@ def load(path):
         return json.load(fh)
 
 
-def record(cache_dir, hardware=None):
-    """Snapshot the current cache (called after every pull). Returns the path, or None if unchanged/absent."""
-    try:
-        vulns, _assets, meta = export.load_cache(cache_dir)
-    except FileNotFoundError:
-        return None
+def record(cache_dir, hardware=None, findings=None, meta=None):
+    """Snapshot the current cache (called after every pull). Returns the path, or None if unchanged/absent.
+
+    Pass findings (a findings frame) and meta when they're already loaded to skip re-reading the cache."""
+    if findings is None or meta is None:
+        try:
+            vulns, _assets, meta = export.load_cache(cache_dir)
+        except FileNotFoundError:
+            return None
+        findings = None
     pulled_at = meta.get("pulled_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
     path = _path_for(cache_dir, pulled_at)
     if path.exists():
         return None
-    findings = normalize.findings_frame(vulns, include_info=False)
+    if findings is None:
+        findings = normalize.findings_frame(vulns, include_info=False)
     return save(cache_dir, build_snapshot(findings, pulled_at, hardware))
 
 
-def ensure_backfill(cache_dir):
+def ensure_backfill(cache_dir, findings=None, meta=None):
     """First run after upgrading: create a snapshot from the existing cache so history starts now."""
     if not list_snapshots(cache_dir):
-        return record(cache_dir)
+        return record(cache_dir, findings=findings, meta=meta)
     return None
 
 

@@ -31,6 +31,18 @@ def test_plan_groups_os_config_and_ranks():
     assert total == len(scored_findings().query("risk > 0"))  # every scored finding in exactly one action
 
 
+def test_members_are_built_on_demand():
+    actions, members = remediation.plan(scored_findings())
+    assert set(members) == set(actions["id"]) and len(members) == len(actions)
+    cfg = actions[actions["type"] == "Configuration"].iloc[0]
+    group = members[cfg["id"]]
+    assert members[cfg["id"]] is group  # built once, then cached
+    assert group["plugin_id"].nunique() == 1 and group["hostname"].nunique() == cfg["devices"]
+    assert members.get("XX999") is None
+    items = remediation.action_items(cfg.to_dict(), group)
+    assert len(items) == cfg["devices"] and items["risk"].is_monotonic_decreasing
+
+
 def test_os_advisory_detection():
     assert remediation.is_os_advisory({"plugin_family": "CISCO", "plugin_name": "x"})
     assert remediation.is_os_advisory({"plugin_family": "Junos Local Security Checks", "plugin_name": "x"})

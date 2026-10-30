@@ -63,7 +63,7 @@ class RemediationView(QWidget):
 
         # detail card
         self.detail_title = QLabel()
-        self.detail_title.setFont(theme.font("section", bold=True))
+        theme.set_font(self.detail_title, "section", bold=True)
         self.detail_title.setWordWrap(True)
         self.detail_info = QLabel()
         self.detail_info.setWordWrap(True)

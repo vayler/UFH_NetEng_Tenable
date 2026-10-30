@@ -125,6 +125,7 @@ class DevicesTab(QWidget):
         self.findings = findings
         self.plugin_devices = (findings.groupby("plugin_id")["hostname"].nunique().to_dict()
                                if not findings.empty else {})
+        self.panel.fleet_counts = self.plugin_devices  # "also on N devices" counts the whole fleet
         self.assets = assets
         self.inventory = inventory if inventory is not None else pd.DataFrame()
         has_hw = not self.inventory.empty
@@ -191,7 +192,6 @@ class DevicesTab(QWidget):
         hostname = device["hostname"]
         rows = self.findings[self.findings["hostname"] == hostname] if not self.findings.empty else self.findings
         self.panel.set_frame(rows)
-        self.panel.detail.shared_counts = self.plugin_devices  # fleet-wide, not just this device
         self.header.setText(self._header_html(device, len(rows)))
 
     def _header_html(self, device, n_findings):

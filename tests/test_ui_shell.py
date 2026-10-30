@@ -90,6 +90,15 @@ def test_navigation_and_navigate(window):
     assert window.current_view() == "findings"
 
 
+def test_hidden_views_load_on_first_use(window):
+    assert window.current_view() == "overview"
+    assert {"findings", "devices", "remediation", "hardware"} <= set(window._pending)
+    window.navigate("remediation")
+    assert "remediation" not in window._pending and window.remediation_view.model.rowCount() > 0
+    assert window.devices_tab.devices_proxy.rowCount() > 0  # attribute access loads it too
+    assert "devices" not in window._pending
+
+
 def test_global_search_targets(window):
     keys = window.search_targets
     assert "Device · core-sw-01" in keys and "CVE · CVE-2024-3400" in keys
