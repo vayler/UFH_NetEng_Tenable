@@ -15,8 +15,8 @@ from tenable_net.gui.widgets import SEVERITY_COLORS, FindingDetail, dot_icon, fi
 from tenable_net.normalize import SEVERITY_ORDER
 
 FINDING_TABLE_COLUMNS = [
-    "severity", "hostname", "ip", "vendor", "plugin_id", "plugin_name", "vpr", "cvss3", "cves",
-    "exploit_available", "port", "state", "last_found",
+    "risk", "severity", "hostname", "ip", "vendor", "plugin_id", "plugin_name", "vpr", "cves",
+    "exploit_available", "port", "state", "days_open", "last_found",
 ]
 
 
@@ -40,7 +40,12 @@ class FindingsPanel(QSplitter):
     def set_frame(self, df):
         self.model.set_frame(df, self._columns)
         self.proxy.set_mask(None)
-        self.table.sortByColumn(self.model.column_index("severity"), Qt.AscendingOrder)
+        if self.model.column_index("risk") >= 0:  # highest risk first
+            self.table.sortByColumn(self.model.column_index("risk"), Qt.DescendingOrder)
+        else:
+            self.table.sortByColumn(self.model.column_index("severity"), Qt.AscendingOrder)
+        if "plugin_id" in df and "hostname" in df and not df.empty:
+            self.detail.shared_counts = df.groupby("plugin_id")["hostname"].nunique().to_dict()
         fit_columns(self.table, max_width=200, caps={"cves": 150})
         self.detail.clear_detail()
         if self.proxy.rowCount():
@@ -188,6 +193,8 @@ class FindingsTab(QWidget):
         if filters.get("severity"):
             for sev, cb in self.sev_checks.items():
                 cb.setChecked(sev == filters["severity"])
+        if filters.get("exploitable"):
+            self.exploitable.setChecked(True)
         self.search.setText(text)
         self.apply_filters()
 

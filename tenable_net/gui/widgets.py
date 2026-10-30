@@ -61,6 +61,45 @@ class SeverityDelegate(QStyledItemDelegate):
         return QSize(82, super().sizeHint(option, index).height())
 
 
+class RiskDelegate(QStyledItemDelegate):
+    """Risk score as a slim bar (band colour) with the number beside it."""
+
+    def paint(self, painter, option, index):
+        value = index.data(RAW_ROLE)
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return super().paint(painter, option, index)
+        if score != score:  # NaN
+            return super().paint(painter, option, index)
+        from tenable_net.risk import band
+
+        self.initStyleOption(option, index)
+        style = option.widget.style() if option.widget else None
+        option.text = ""
+        if style:
+            style.drawControl(style.ControlElement.CE_ItemViewItem, option, painter, option.widget)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(option.rect).adjusted(8, 0, -8, 0)
+        text_w = 34
+        track = QRectF(r.left(), r.center().y() - 3, max(r.width() - text_w - 6, 10), 6)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.tokens()["border"]))
+        painter.drawRoundedRect(track, 3, 3)
+        fill = QRectF(track)
+        fill.setWidth(track.width() * max(0.0, min(score, 100.0)) / 100.0)
+        painter.setBrush(QColor(theme.band_color(band(score))))
+        painter.drawRoundedRect(fill, 3, 3)
+        painter.setPen(option.palette.color(option.palette.ColorRole.Text))
+        painter.drawText(QRectF(track.right() + 6, r.top(), text_w, r.height()), Qt.AlignVCenter | Qt.AlignRight,
+                         f"{score:.0f}")
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(120, super().sizeHint(option, index).height())
+
+
 def make_table(model, stretch_column=None):
     """A sortable, read-only, row-selecting table view with sensible defaults."""
     view = QTableView()
@@ -81,6 +120,7 @@ def make_table(model, stretch_column=None):
     view.horizontalHeader().setStretchLastSection(stretch_column is None)
     view.setItemDelegate(QStyledItemDelegate(view))
     view._severity_delegate = SeverityDelegate(view)
+    view._risk_delegate = RiskDelegate(view)
     view._stretch_column = stretch_column
     return view
 
@@ -99,9 +139,13 @@ def fit_columns(view, max_width=360, caps=None):
     for i, col in enumerate(columns):
         if col == "severity":
             view.setItemDelegateForColumn(i, view._severity_delegate)
+        elif col == "risk":
+            view.setItemDelegateForColumn(i, view._risk_delegate)
         view.resizeColumnToContents(i)
         if col == "severity":
             view.setColumnWidth(i, 88)
+        elif col == "risk":
+            view.setColumnWidth(i, 120)
         elif view.columnWidth(i) > caps.get(col, max_width):
             view.setColumnWidth(i, caps.get(col, max_width))
         if col == view._stretch_column:
@@ -268,6 +312,7 @@ class FindingDetail(QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setOpenExternalLinks(True)
+        self.shared_counts = None  # {plugin_id: devices with it}, set by the owning panel
         self.clear_detail()
 
     def clear_detail(self):
@@ -286,7 +331,17 @@ class FindingDetail(QTextBrowser):
         plugin_id = field("plugin_id")
         port = field("port")
         proto = field("protocol")
-        facts = [
+        facts = []
+        if row.get("risk") is not None and row.get("risk") == row.get("risk"):
+            from tenable_net.risk import band, explain_finding
+
+            score, why = explain_finding(dict(row))
+            facts.append(("Risk score", f"{theme.band_badge(band(score), f'{score:.0f} · {band(score)}')}"
+                                        f"&nbsp; <span style='color:gray'>{esc(why)}</span>"))
+        if self.shared_counts is not None and row.get("plugin_id") in self.shared_counts:
+            n = int(self.shared_counts[row.get("plugin_id")])
+            facts.append(("Also on", f"{n} device{'s' if n != 1 else ''} in total"))
+        facts += [
             ("Device", f"{esc(field('hostname'))} ({esc(field('ip'))})"),
             ("OS", esc(field("os"))),
             ("Port", f"{port}/{proto}" if port else "—"),

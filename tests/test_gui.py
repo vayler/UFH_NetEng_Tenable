@@ -84,7 +84,8 @@ def test_findings_filters_and_drilldown(window):
     assert tab.panel.proxy.rowCount() == 2
     window.open_severity("high")
     assert tab.panel.proxy.rowCount() == 2
-    assert all(tab.panel.proxy.index(r, 0).data() == "high" for r in range(2))
+    sev_col = tab.panel.model.column_index("severity")
+    assert all(tab.panel.proxy.index(r, sev_col).data() == "high" for r in range(2))
     assert "Junos J-Web RCE" in tab.panel.detail.toPlainText()  # highest-VPR high finding selected
 
 
@@ -210,12 +211,13 @@ def test_devices_tab_hardware(app, inventory_cache):
     assert tab.select_device("lab-sw-01")
     assert "Not in Tenable" in tab.header.text() and "EoL bulletin" in tab.header.text()
 
-    assert w.overview.cards["hardware"].isVisibleTo(w.overview)
+    assert w.overview.cards["uncovered"].value.text() == "2"  # core-sw-01 (one member) + old-sw-07
     w.close()
 
 
 def test_hardware_card_hidden_without_inventory(window):
-    assert not window.overview.cards["hardware"].isVisibleTo(window.overview)
+    assert window.overview.cards["uncovered"].value.text() == "–"
+    assert "hardware inventory" in window.overview.cards["uncovered"].delta.text()
     assert not window.devices_tab.lifecycle_filter.isVisibleTo(window.devices_tab)
 
 

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QMessageBox, QPushButton, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from tenable_net import __version__, akips, cisco, client, export, glossary, inventory, normalize, reports
+from tenable_net import __version__, akips, cisco, client, export, glossary, inventory, normalize, reports, risk
 from tenable_net.gui import theme
 from tenable_net.gui.devices import DevicesTab
 from tenable_net.gui.dialogs import PullDialog, SettingsDialog
@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self.overview.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
         self.overview.plugin_activated.connect(lambda p: self.navigate("findings", text=p))
         self.overview.severity_activated.connect(lambda s: self.navigate("findings", severity=s))
+        self.overview.view_requested.connect(lambda view, filters: self.navigate(view, **filters))
         self.pages = QStackedWidget()
         self.views = {"overview": self.overview, "findings": self.findings_tab, "devices": self.devices_tab}
         self.view_keys = []
@@ -400,10 +401,15 @@ class MainWindow(QMainWindow):
         """Show a view, optionally filtered: findings(text=, severity=), devices(hostname=),
         diagnostics(stage=)."""
         page = self.show_view(view)
-        if view == "findings" and (filters.get("text") is not None or filters.get("severity")):
-            page.show_query(filters.get("text") or "", severity=filters.get("severity"))
+        if view == "findings" and (filters.get("text") is not None or filters.get("severity")
+                                   or filters.get("exploitable")):
+            page.show_query(filters.get("text") or "", severity=filters.get("severity"),
+                            exploitable=filters.get("exploitable", False))
         elif view == "devices" and filters.get("hostname"):
             page.select_device(filters["hostname"])
+        elif view == "devices" and filters.get("lifecycle"):
+            page.search.clear()
+            page.lifecycle_filter.setCurrentText(filters["lifecycle"])
         elif view == "diagnostics" and filters.get("stage"):
             page.select_stage(filters["stage"])
         return page
@@ -522,6 +528,7 @@ class MainWindow(QMainWindow):
         try:
             findings = normalize.findings_frame(vulns, include_info=True)
             findings["vendor"] = findings["os"].map(normalize.vendor_of)
+            findings = risk.add_finding_scores(findings)
             self.findings = findings
             self.assets = normalize.assets_frame(assets)
             self.inventory = inventory.load_inventory(self.cache_dir, vulns, assets)
@@ -624,7 +631,8 @@ class MainWindow(QMainWindow):
     def export_report(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            paths = reports.write_reports(self.findings.drop(columns=["vendor"]), self.assets,
+            paths = reports.write_reports(self.findings.drop(columns=["vendor", "risk", "days_open"], errors="ignore"),
+                                          self.assets,
                                           inventory=self.inventory)
         finally:
             QApplication.restoreOverrideCursor()

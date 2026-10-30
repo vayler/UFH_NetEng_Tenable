@@ -57,7 +57,6 @@ SEVERITY_TEXT = {s: "#FFFFFF" for s in SEVERITY_COLORS}  # text on a solid sever
 STATUS_TOKENS = {
     "Past LDoS": "bad", "Not covered": "bad", "LDoS < 12 mo": "warn", "End of sale": "warn",
     "Upgrade suggested": "warn", "Covered": "good", "On suggested release": "good", "OK": "good",
-    "Critical": "bad", "High": "warn", "Elevated": "warn", "Low": "good",
 }
 
 TYPE_SCALE = {"caption": 0.88, "body": 1.0, "section": 1.08, "title": 1.35, "kpi": 2.0, "brand": 1.25}
@@ -107,6 +106,18 @@ def severity_tint(severity, mode_name=None):
 
 def severity_ink(severity, mode_name=None):
     return SEVERITY_INK[mode_name or _state["mode"]].get(severity, tokens(mode_name)["text"])
+
+
+BAND_SEVERITY = {"Critical": "critical", "High": "high", "Elevated": "medium", "Low": "low"}
+
+
+def band_color(band_name):
+    """Risk bands reuse the severity hues so colour means the same thing everywhere."""
+    return SEVERITY_COLORS[BAND_SEVERITY.get(str(band_name), "info")]
+
+
+def band_badge(band_name, label=None):
+    return severity_badge(BAND_SEVERITY.get(str(band_name), "info"), label if label is not None else str(band_name))
 
 
 def severity_badge(severity, label=None):

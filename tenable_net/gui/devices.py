@@ -8,7 +8,7 @@ import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QSplitter, QVBoxLayout, QWidget
 
-from tenable_net import reports
+from tenable_net import reports, risk
 from tenable_net.gui.findings import FindingsPanel
 from tenable_net.gui import theme
 from tenable_net.gui.models import DataFrameModel, MaskFilterProxy, display
@@ -16,11 +16,12 @@ from tenable_net.gui.widgets import SEVERITY_COLORS, SEVERITY_TEXT, fit_columns,
 from tenable_net.inventory import device_summary, has_lifecycle
 from tenable_net.normalize import vendor_of
 
-DEVICE_COLUMNS = ["hostname", "ip", "vendor", "critical", "high", "medium", "low", "max_vpr"]
+DEVICE_COLUMNS = ["hostname", "risk", "ip", "vendor", "critical", "high", "medium", "low"]
 # Hardware mode has more columns, so only critical/high counts are listed (the header shows all four).
-HARDWARE_DEVICE_COLUMNS = ["hostname", "model", "contract", "sw_status", "lifecycle", "critical", "high"]
+HARDWARE_DEVICE_COLUMNS = ["hostname", "risk", "model", "contract", "sw_status", "lifecycle", "critical", "high"]
 DEVICE_FINDING_COLUMNS = [
-    "severity", "plugin_id", "plugin_name", "vpr", "cves", "exploit_available", "port", "state", "last_found",
+    "risk", "severity", "plugin_id", "plugin_name", "vpr", "cves", "exploit_available", "port", "days_open",
+    "last_found",
 ]
 LIFECYCLE_FILTERS = {
     "All devices": None,
@@ -122,6 +123,8 @@ class DevicesTab(QWidget):
     def set_data(self, findings, assets, inventory=None, enrichment=None):
         self.enrichment = enrichment or {}
         self.findings = findings
+        self.plugin_devices = (findings.groupby("plugin_id")["hostname"].nunique().to_dict()
+                               if not findings.empty else {})
         self.assets = assets
         self.inventory = inventory if inventory is not None else pd.DataFrame()
         has_hw = not self.inventory.empty
@@ -129,11 +132,20 @@ class DevicesTab(QWidget):
         if not has_hw:
             self.lifecycle_filter.setCurrentIndex(0)
         devices = device_frame(findings, assets, self.inventory if has_hw else None)
+        hw_summary = device_summary(self.inventory) if has_hw else None
+        self.hw_by_host = {r["hostname"]: r for r in hw_summary.to_dict("records")} if hw_summary is not None else {}
+        if "risk" in findings:
+            scores = risk.device_scores(findings, hw_summary)[["hostname", "risk", "risk_band"]]
+            devices = devices.merge(scores, on="hostname", how="left")
+            devices["risk"] = devices["risk"].fillna(0.0)
+            devices["risk_band"] = devices["risk_band"].fillna("Low")
+        else:
+            devices["risk"], devices["risk_band"] = 0.0, "Low"
         columns = DEVICE_COLUMNS
         if has_hw:  # lifecycle only when EoX data exists
             columns = [c for c in HARDWARE_DEVICE_COLUMNS if c != "lifecycle" or has_lifecycle(self.inventory)]
         self.devices_model.set_frame(devices, columns)
-        self.devices_view.sortByColumn(self.devices_model.column_index("critical"), Qt.DescendingOrder)
+        self.devices_view.sortByColumn(self.devices_model.column_index("risk"), Qt.DescendingOrder)
         self.devices_view._stretch_column = None if has_hw else "hostname"
         self.devices_view.horizontalHeader().setStretchLastSection(has_hw)
         fit_columns(self.devices_view, max_width=200, caps={"model": 150})
@@ -179,6 +191,7 @@ class DevicesTab(QWidget):
         hostname = device["hostname"]
         rows = self.findings[self.findings["hostname"] == hostname] if not self.findings.empty else self.findings
         self.panel.set_frame(rows)
+        self.panel.detail.shared_counts = self.plugin_devices  # fleet-wide, not just this device
         self.header.setText(self._header_html(device, len(rows)))
 
     def _header_html(self, device, n_findings):
@@ -202,9 +215,30 @@ class DevicesTab(QWidget):
             f"<h2 style='margin:0'>{html.escape(str(device['hostname']))}</h2>"
             f"<span style='color:gray'>{html.escape(str(device.get('ip') or ''))} · "
             f"{html.escape(str(device.get('os') or 'Unknown OS'))}</span>{extra}"
+            f"{self._risk_html(device)}"
             f"{self._hardware_html(device['hostname'])}"
             f"<p>{badges} &nbsp; <b>{n_findings}</b> findings</p>"
         )
+
+    def _risk_html(self, device):
+        """Risk score with the parts that add up to it ("why this score")."""
+        if "risk" not in self.findings:
+            return ""
+        parts, detail = risk.explain_device(device["hostname"], self.findings, self.hw_by_host.get(device["hostname"]))
+        score = float(device.get("risk") or 0)
+        band_name = risk.band(score)
+        muted = theme.tokens()["text_muted"]
+        items = "".join(
+            f"<tr><td style='padding-right:14px'>{html.escape(label)}</td>"
+            f"<td align='right'>{'+' if points >= 0 else ''}{points:g}</td></tr>" for label, points in parts)
+        top = ""
+        if detail:
+            name, factors = detail[0]
+            top = (f"<div style='color:{muted}'>Top finding: {html.escape(name)} = "
+                   + " + ".join(f"{html.escape(lbl)} ({pts:g})" for lbl, pts in factors) + "</div>")
+        return (f"<p style='margin:8px 0 2px 0'>{theme.band_badge(band_name, f'Risk {score:.0f} · {band_name}')}"
+                f"&nbsp; <span style='color:{muted}'>why this score:</span></p>"
+                f"<table style='color:{muted}'>{items}</table>{top}")
 
     def _hardware_html(self, hostname):
         if self.inventory.empty:

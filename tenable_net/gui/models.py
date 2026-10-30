@@ -27,6 +27,7 @@ HEADERS = {
     "recommended_sw": "Cisco suggested", "sw_version": "Running", "akips_device": "AKiPS device",
     "with_serial": "With serial", "match_method": "Matched by", "members": "Members", "sys_name": "sysName",
     "sys_descr": "sysDescr", "stage": "Stage", "reason": "Reason", "models": "Models", "chassis": "Chassis",
+    "risk": "Risk", "risk_band": "Risk band", "days_open": "Days open", "top_finding": "Top finding",
 }
 STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage")
 
