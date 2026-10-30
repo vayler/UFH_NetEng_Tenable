@@ -1,0 +1,289 @@
+[
+ {
+  "asset": {
+   "uuid": "uuid-core-sw-01",
+   "hostname": "core-sw-01",
+   "ipv4": "10.0.0.1",
+   "operating_system": [
+    "Cisco IOS XE 17.6.1"
+   ]
+  },
+  "plugin": {
+   "id": 180001,
+   "name": "Cisco IOS XE Web UI Privilege Escalation",
+   "family": "CISCO",
+   "cve": [
+    "CVE-2023-20198"
+   ],
+   "cvss3_base_score": 9.8,
+   "vpr": {
+    "score": 9.8
+   },
+   "exploit_available": true,
+   "synopsis": "Cisco IOS XE Web UI Privilege Escalation synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 443,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "critical",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-core-sw-01",
+   "hostname": "core-sw-01",
+   "ipv4": "10.0.0.1",
+   "operating_system": [
+    "Cisco IOS XE 17.6.1"
+   ]
+  },
+  "plugin": {
+   "id": 180002,
+   "name": "Cisco IOS XE SNMP DoS",
+   "family": "CISCO",
+   "cve": [
+    "CVE-2024-11111",
+    "CVE-2024-11112"
+   ],
+   "cvss3_base_score": 7.5,
+   "vpr": {
+    "score": 6.7
+   },
+   "exploit_available": false,
+   "synopsis": "Cisco IOS XE SNMP DoS synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 161,
+   "protocol": "udp",
+   "service": "general"
+  },
+  "severity": "high",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-core-sw-02",
+   "hostname": "core-sw-02",
+   "ipv4": "10.0.0.2",
+   "operating_system": [
+    "Cisco IOS XE 17.6.1"
+   ]
+  },
+  "plugin": {
+   "id": 180001,
+   "name": "Cisco IOS XE Web UI Privilege Escalation",
+   "family": "CISCO",
+   "cve": [
+    "CVE-2023-20198"
+   ],
+   "cvss3_base_score": 9.8,
+   "vpr": {
+    "score": 9.8
+   },
+   "exploit_available": true,
+   "synopsis": "Cisco IOS XE Web UI Privilege Escalation synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 443,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "critical",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-edge-fw-01",
+   "hostname": "edge-fw-01",
+   "ipv4": "10.0.1.1",
+   "operating_system": [
+    "Palo Alto Networks PAN-OS 10.2.3"
+   ]
+  },
+  "plugin": {
+   "id": 190001,
+   "name": "Palo Alto PAN-OS GlobalProtect Command Injection",
+   "family": "Palo Alto Local Security Checks",
+   "cve": [
+    "CVE-2024-3400"
+   ],
+   "cvss3_base_score": 9.8,
+   "vpr": {
+    "score": 10.0
+   },
+   "exploit_available": true,
+   "synopsis": "Palo Alto PAN-OS GlobalProtect Command Injection synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 443,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "critical",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-edge-fw-01",
+   "hostname": "edge-fw-01",
+   "ipv4": "10.0.1.1",
+   "operating_system": [
+    "Palo Alto Networks PAN-OS 10.2.3"
+   ]
+  },
+  "plugin": {
+   "id": 57582,
+   "name": "SSL Self-Signed Certificate",
+   "family": "General",
+   "cve": [],
+   "cvss3_base_score": 5.3,
+   "vpr": {},
+   "exploit_available": false,
+   "synopsis": "SSL Self-Signed Certificate synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 443,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "medium",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-dist-rtr-01",
+   "hostname": "dist-rtr-01",
+   "ipv4": "10.0.2.1",
+   "operating_system": [
+    "Juniper Junos OS 21.4R3"
+   ]
+  },
+  "plugin": {
+   "id": 200001,
+   "name": "Juniper Junos J-Web RCE",
+   "family": "Junos Local Security Checks",
+   "cve": [
+    "CVE-2023-36845"
+   ],
+   "cvss3_base_score": 7.5,
+   "vpr": {
+    "score": 8.1
+   },
+   "exploit_available": false,
+   "synopsis": "Juniper Junos J-Web RCE synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 443,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "high",
+  "state": "REOPENED",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-dist-rtr-01",
+   "hostname": "dist-rtr-01",
+   "ipv4": "10.0.2.1",
+   "operating_system": [
+    "Juniper Junos OS 21.4R3"
+   ]
+  },
+  "plugin": {
+   "id": 10114,
+   "name": "ICMP Timestamp Request Remote Date Disclosure",
+   "family": "General",
+   "cve": [
+    "CVE-1999-0524"
+   ],
+   "cvss3_base_score": 3.1,
+   "vpr": {},
+   "exploit_available": false,
+   "synopsis": "ICMP Timestamp Request Remote Date Disclosure synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 0,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "low",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ },
+ {
+  "asset": {
+   "uuid": "uuid-dist-rtr-01",
+   "hostname": "dist-rtr-01",
+   "ipv4": "10.0.2.1",
+   "operating_system": [
+    "Juniper Junos OS 21.4R3"
+   ]
+  },
+  "plugin": {
+   "id": 19506,
+   "name": "Nessus Scan Information",
+   "family": "Settings",
+   "cve": [],
+   "cvss3_base_score": 0,
+   "vpr": {},
+   "exploit_available": false,
+   "synopsis": "Nessus Scan Information synopsis",
+   "solution": "Upgrade to a fixed release.",
+   "see_also": [
+    "https://example.invalid/advisory"
+   ]
+  },
+  "port": {
+   "port": 0,
+   "protocol": "tcp",
+   "service": "general"
+  },
+  "severity": "info",
+  "state": "OPEN",
+  "first_found": "2026-08-01T12:00:00Z",
+  "last_found": "2026-10-28T12:00:00Z"
+ }
+]

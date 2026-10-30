@@ -1,0 +1,41 @@
+[
+ {
+  "id": "uuid-core-sw-01",
+  "hostnames": [
+   "core-sw-01"
+  ],
+  "ipv4s": [
+   "10.0.0.1"
+  ],
+  "operating_systems": [
+   "Cisco IOS XE 17.6.1"
+  ],
+  "system_types": [
+   "router"
+  ],
+  "tags": [
+   {
+    "key": "Site",
+    "value": "Main"
+   }
+  ],
+  "last_seen": "2026-10-28T12:00:00Z"
+ },
+ {
+  "id": "uuid-oob-sw-09",
+  "hostnames": [
+   "oob-sw-09"
+  ],
+  "ipv4s": [
+   "10.9.9.9"
+  ],
+  "operating_systems": [
+   "Aruba AOS-CX"
+  ],
+  "system_types": [
+   "switch"
+  ],
+  "tags": [],
+  "last_seen": "2026-10-20T12:00:00Z"
+ }
+]
