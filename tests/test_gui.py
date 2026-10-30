@@ -145,3 +145,21 @@ def test_export_cancel(app, tmp_path, monkeypatch):
     with pytest.raises(export.ExportCancelled):
         export.pull(FakeTio(), ["high"], ["open"], cache_dir=tmp_path, cancelled=lambda: True)
     assert not (tmp_path / export.VULNS_FILE).exists()
+
+
+def test_crash_handler_logs_and_reports(app, tmp_path, monkeypatch):
+    import sys
+
+    from tenable_net.gui import app as app_module
+
+    shown = []
+    monkeypatch.setattr(app_module.QMessageBox, "critical", lambda *a: shown.append(a))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # restored after the test
+    log = tmp_path / "logs" / "gui-error.log"
+    hook = app_module.install_crash_handler(log)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        hook(*sys.exc_info())
+    assert "ValueError: boom" in log.read_text()
+    assert shown and "boom" in shown[0][2]

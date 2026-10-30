@@ -4,6 +4,27 @@ A desktop app and command-line tool for pulling network-equipment vulnerability 
 
 ![Overview](docs/screenshots/overview.png)
 
+## Windows: one-click start
+
+1. Download this branch as a ZIP and extract it, or clone it.
+2. Double-click **`run_gui.bat`**.
+
+The launcher:
+- **Finds Python:** uses a 64-bit Python 3.10–3.14. If there isn't one, it offers to install Python 3.12 for your user via `winget`.
+- **Sets up `.venv`:** creates it next to the script, and rebuilds it if it's broken.
+- **Installs packages:** installs `requirements.txt` the first time, and again whenever that file changes. The first run takes a few minutes.
+- **Opens the app:** after the first run, double-clicking goes straight to the app.
+
+Nothing is installed into your system Python.
+
+| If… | Do this |
+|---|---|
+| The app doesn't open or closes immediately | Run `run_gui.bat debug` from a Command Prompt to see errors in the console. Crashes are also logged to `logs\gui-error.log`. |
+| Installing packages fails | Read the end of `logs\setup.log`. Behind a proxy, run `set HTTPS_PROXY=http://your-proxy:port` in a Command Prompt, then run `run_gui.bat` from that window. |
+| Something is half-installed | Delete the `.venv` folder and run `run_gui.bat` again. |
+
+Your API keys, the `cache\` folder and reports all live in the project folder next to `run_gui.bat`.
+
 ## How it works
 
 1. **`pull`** uses Tenable's **bulk export API** (via the official [pyTenable](https://github.com/tenable/pyTenable) SDK). Tenable builds the dataset server-side in chunks, and pyTenable downloads them, polls for completion, and backs off on rate limits. This is much faster than paging through the UI.
