@@ -71,21 +71,41 @@ Run commands from the project folder: the cache (`cache/`) and `.env` are found 
 python -m tenable_net gui
 ```
 
-This is a native Qt (PySide6) app for Windows, macOS, and Linux, in UF Health colours (light and dark). It reads the same `cache/` as the CLI, so data you pull in one is visible in the other. When the CLI updates the cache, the app reloads automatically.
+This is a native Qt (PySide6) app for Windows, macOS, and Linux. Its interface is quiet and keyboard-first, in the style of tools like Linear: grey surfaces, one accent colour (UF Health blue), compact type (Inter, bundled with the app), and light and dark themes. It reads the same `cache/` as the CLI, so data you pull in one is visible in the other. When the CLI updates the cache, the app reloads automatically.
 
-The navy sidebar holds the views, a **Data sources** panel (how old the data is, plus Tenable / AKiPS / Cisco status; click one to open Settings or Diagnostics) and **Settings**. The top bar has a global search (**Ctrl+K**: devices, CVEs, plugins, models, serials), **Export**, **Present** and **Pull from Tenable**. Almost every number, bar and row is clickable and opens the list behind it, already filtered.
+- **Sidebar:** the **UF Health** menu at the top holds every command (pull, reload, export, presentation mode, theme, settings, glossary, keyboard shortcuts, quit). Below it are **Search** (opens the command palette), the views with their counts, **Data sources** (how old the data is, plus Tenable / AKiPS / Cisco status; click one to open Settings or Diagnostics) and **Settings**.
+- **Header:** the current view's title, **Export**, **Present** and **Pull from Tenable**.
+- Almost every number, bar and row is clickable and opens the list behind it, already filtered.
 
 | View | What you can do |
 |---|---|
 | **Overview** | Fleet risk score and band, devices by risk band, and the single fix that matters most. KPI cards (critical, high, exploitable, devices at risk, not covered, upgrade suggested) show the change since the last pull and a sparkline. Also: what changed since the last pull (new / fixed / reopened), the top remediation actions, the highest-risk devices and vulnerabilities, and charts by severity and vendor. A getting-started checklist shows until Tenable, AKiPS and Cisco are set up. |
-| **Findings** | Every finding, highest risk first. Filter by severity, state, vendor, minimum VPR, exploit available, *new or reopened only*, and free text (device, IP, plugin name/ID, CVE, OS; every word must match). The detail pane explains the risk score and shows how many devices share the finding, with CVE (NVD), Tenable plugin and advisory links. **Export view…** saves exactly the rows on screen. |
+| **Findings** | Every finding, highest risk first. The filter bar narrows by severity, state, vendor, minimum VPR, *Exploitable*, *New or reopened*, and free text (device, IP, plugin name/ID, CVE, OS; every word must match). Each filter shows what it is set to, and **Clear** resets them all. The detail pane on the right explains the risk score and shows how many devices share the finding, with CVE (NVD), Tenable plugin and advisory links. The export button saves exactly the rows on screen. |
 | **Devices** | Devices ranked by risk, including inventory devices with no findings. Each device shows *why this score* (its itemised breakdown), a risk trend from history, hardware and contract details, why enrichment stopped (if it did), and every finding. |
 | **Remediation** | Fixes ranked by how much risk they remove per device touched (see below). Filter by type, vendor or text. Pick an action to see its devices, target release and confidence. Export one action to CSV for a change ticket, or the whole plan to Excel. |
-| **Hardware & Contracts** | Contract coverage, software vs. Cisco's suggestion, and contracts ending in the next 12 months, plus the fleet table (model, serial, running vs. suggested release, contract, end date, lifecycle) with filters. Needs the hardware inventory (below). |
+| **Hardware** | Contract coverage, software vs. Cisco's suggestion, and contracts ending in the next 12 months, plus the fleet table (model, serial, running vs. suggested release, contract, end date, lifecycle) with filters. Needs the hardware inventory (below). |
 | **Trends** | Open findings by severity over time, new vs. fixed per pull, fleet risk vs. devices at risk, and time to fix by severity. Pick a range (30 / 90 days / all history); click a *New* bar to list the new and reopened findings. |
 | **Diagnostics** | Why devices are missing hardware or Cisco data (see *Troubleshooting enrichment*). |
 
 ![Findings, dark theme](docs/screenshots/findings-dark.png)
+
+### Command palette and shortcuts
+
+**Ctrl+K** (or **Search** in the sidebar) opens the command palette. Type to jump to a device, CVE, plugin, model or serial number, or to run any command: go to a view, pull, export, switch theme and so on. The arrow keys move, Enter opens and Esc closes. If nothing matches, Enter searches the findings for what you typed.
+
+| Keys | What it does |
+|---|---|
+| Ctrl+K | Command palette |
+| Ctrl+F | Search the current view |
+| Ctrl+1 … Ctrl+7 | Go to a view |
+| Ctrl+P | Pull from Tenable |
+| F5 | Reload the cache |
+| Ctrl+E · Ctrl+Shift+E · Ctrl+Shift+S | Excel report · executive summary (PDF) · current view as an image |
+| F11 | Presentation mode (Esc leaves) |
+| Ctrl+, | Settings |
+| Ctrl+/ | List every shortcut |
+
+![Command palette](docs/screenshots/palette.png)
 
 ### Risk scores
 
@@ -115,7 +135,7 @@ Actions are ranked by **risk removed ÷ √devices touched**, so a fix that clos
 
 ### Meetings: presentation mode and exports
 
-- **Present** (F11, Esc to leave) goes full screen with larger type and only Overview, Remediation, Hardware & Contracts and Trends.
+- **Present** (F11, Esc to leave) goes full screen with larger type and only Overview, Remediation, Hardware and Trends.
 - **Export → Executive summary (PDF)** writes a one-page summary: fleet risk, key numbers with changes, what changed since the last pull, top actions, highest-risk devices, hardware status, the severity chart and the open-findings trend.
 - **Export → Current view as image (PNG)** for slides and emails.
 - **Export → Excel report** writes the full workbook described below.
@@ -125,8 +145,8 @@ Actions are ranked by **risk removed ÷ √devices touched**, so a fix that clos
 ### Other controls
 
 - **Pull from Tenable** (Ctrl+P) lets you choose severities, states, a last-seen window, plugin output, and whether to refresh the hardware inventory. The export runs in the background with live record counts and can be cancelled. If you cancel or the pull fails, your previous cache is kept. Each pull also saves a history snapshot.
-- **Settings…** has a tab each for Tenable, AKiPS and Cisco credentials, each with **Test connection** to check them before saving.
-- **View → Theme** switches between System, Light, and Dark. Ctrl+F jumps to the current view's search and F5 reloads the cache.
+- **Settings** has a page each for Tenable, AKiPS and Cisco credentials, each with **Test connection** to check them before saving.
+- **Theme** (System, Light or Dark) is in the **UF Health** menu and the command palette.
 
 ![Trends](docs/screenshots/trends.png)
 
@@ -165,7 +185,7 @@ python -m tenable_net pull --with-inventory     # vuln pull + inventory in one g
 
 In the app:
 - **Pull dialog:** has **Hardware inventory** and **Cisco enrichment** options.
-- **Hardware & Contracts view:** the whole fleet at a glance (see *Desktop app*).
+- **Hardware view:** the whole fleet at a glance (see *Desktop app*).
 - **Devices view:** gains Model / Contract / Software columns (plus Lifecycle with EoX). Each device has a per-member table showing serial, running vs. Cisco-suggested release, contract status, end date and contract number. It also has these filters:
   - **Not under contract**
   - **Contract ends within 90 days**
@@ -176,13 +196,13 @@ In the app:
 - **Remediation:** adds *Renew support contract* and LDoS replacement actions.
 - **Excel report:** gets a **Hardware & Lifecycle** sheet, plus contract/software columns on **By Device**.
 
-![Hardware & Contracts](docs/screenshots/hardware.png)
+![Hardware & contracts](docs/screenshots/hardware.png)
 
 ![Devices](docs/screenshots/devices.png)
 
 ### Troubleshooting enrichment
 
-The **Diagnostics** view (also **Tools → Enrichment diagnostics**) shows where each device falls out of the AKiPS → Cisco pipeline:
+The **Diagnostics** view (under **Tools** in the sidebar, and in the **UF Health** menu) shows where each device falls out of the AKiPS → Cisco pipeline:
 
 - **Funnel:** Tenable devices → with hardware inventory → with a model → with a serial → identified as Cisco → fully enriched. It also shows the result of the last Cisco run (sent / found / rejected per API).
 - **Where devices stop:** each device's first failing stage, with a plain-English reason and what to do. Click a stage to list its devices.
@@ -317,18 +337,22 @@ tenable_net/
   inventory.py   Tenable inventory plugins, AKiPS↔Tenable matching, lifecycle/contract rollups
   cisco.py       Cisco Support API client (EoX, Serial Number to Info) with 7-day cache
   gui/
-    app.py       main window: sidebar, top bar, navigate(), presentation mode, exports
-    theme.py     UF Health colour tokens (light/dark), type scale, stylesheet
-    overview.py  fleet risk, KPI cards with change, since-last-pull, top actions, charts
-    findings.py  filter sidebar, findings table + detail pane
+    app.py       main window: sidebar, header, workspace menu, navigate(), presentation mode, exports
+    palette.py   command palette (Ctrl+K)
+    theme.py     design tokens (light/dark), type scale, bundled fonts, stylesheet
+    icons.py     line icons, drawn for this app and rendered with QtSvg
+    charts.py    QtCharts styling and print rendering
+    fonts/       Inter (SIL Open Font License; see fonts/LICENSE.txt)
+    overview.py  fleet risk, key numbers with change, since-last-pull, top actions, charts
+    findings.py  filter bar, findings table + detail pane
     devices.py   device list and per-device drill-down with risk breakdown
     remediation.py  ranked action list, per-action devices, exports
-    hardware.py  Hardware & Contracts charts and fleet table
+    hardware.py  Hardware & contracts charts and fleet table
     trends.py    history charts and time to fix
     executive_summary.py  one-page PDF summary
     diagnostics_window.py  enrichment diagnostics view
     dialogs.py   pull dialog (background thread) and Tenable / AKiPS / Cisco settings
     models.py    DataFrame-backed Qt table models
     filters.py   pandas filtering behind the Findings tab
-    widgets.py   severity pills, KPI cards, detail pane, worker thread
+    widgets.py   tables and cell painters, stat tiles, panels, filter chips, toast, detail pane, worker thread
 ```

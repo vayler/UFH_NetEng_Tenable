@@ -34,6 +34,11 @@ HEADERS = {
     "plugins": "Plugins",
 }
 STATUS_COLUMNS = ("lifecycle", "contract", "sw_status", "risk_band", "stage", "change", "confidence")
+# Identifiers, addresses and dates are secondary information: drawn in the muted text colour.
+MUTED_COLUMNS = ("ip", "plugin_id", "port", "protocol", "first_found", "last_found", "last_seen", "days_open",
+                 "member", "source", "contract_number", "akips_device", "match_method", "rank", "contract_end", "ldos",
+                 "service_level")
+LEFT_ALIGNED = ("plugin_id", "first_found", "last_found", "last_seen", "risk", "contract_end", "ldos")
 
 
 def _is_missing(value):
@@ -124,19 +129,23 @@ class DataFrameModel(QAbstractTableModel):
         if role == RAW_ROLE:
             return value
         if role == Qt.TextAlignmentRole:
-            if self._numeric[column] and column not in ("plugin_id", "first_found", "last_found", "last_seen"):
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            return int(Qt.AlignLeft | Qt.AlignVCenter)
-        if role == Qt.ForegroundRole and column in STATUS_COLUMNS:
-            hex_color = theme.status_color(value)
-            return QColor(hex_color) if hex_color else None
+            return self._alignment(column)
+        if role == Qt.ForegroundRole and column in MUTED_COLUMNS:
+            return QColor(theme.tokens()["text_muted"])
         if role == Qt.ToolTipRole and column in ("plugin_name", "cves", "os", "model"):
             return display(column, value)
         return None
 
+    def _alignment(self, column):
+        if self._numeric[column] and column not in LEFT_ALIGNED:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        return int(Qt.AlignLeft | Qt.AlignVCenter)
+
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.ToolTipRole and orientation == Qt.Horizontal:
             return glossary.tooltip(self._columns[section])
+        if role == Qt.TextAlignmentRole and orientation == Qt.Horizontal and section < len(self._columns):
+            return self._alignment(self._columns[section])
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:

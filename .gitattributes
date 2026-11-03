@@ -1,2 +1,5 @@
 # Batch files must keep CRLF line endings or cmd.exe misparses labels; store them as-is.
 *.bat -text
+
+# Fonts are binary.
+*.otf binary

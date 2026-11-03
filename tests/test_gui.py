@@ -411,10 +411,13 @@ def test_presentation_mode_and_exports(app, cache_dir, tmp_path, monkeypatch):
     assert w.current_view() == "overview"  # findings isn't a presentation view
     visible = [w.nav.item(i).data(Qt.UserRole) for i in range(w.nav.count()) if not w.nav.item(i).isHidden()]
     assert set(visible) == {"overview", "trends", "remediation", "hardware"}
-    assert not w.menuBar().isVisible()
+    assert w.search_button.isHidden() and w.pull_button.isHidden()
+    assert {e.title for e in w.palette_entries() if e.group == "Go to"} == {
+        "Go to Overview", "Go to Remediation", "Go to Hardware", "Go to Trends"}
     w.toggle_presentation()
     assert not w.presenting and not theme.presentation()
     assert all(not w.nav.item(i).isHidden() for i in range(w.nav.count()))
+    assert not w.search_button.isHidden() and not w.pull_button.isHidden()
 
     monkeypatch.setattr("tenable_net.gui.app.QDesktopServices.openUrl", lambda *_a: True)
     pdf = w.export_summary(tmp_path / "summary.pdf")
@@ -430,8 +433,10 @@ def test_executive_summary_html(app, cache_dir, monkeypatch):
     monkeypatch.chdir(cache_dir)
     w = MainWindow(cache_dir)
     data = w.summary_data()
+    image = data["images"]["severity"][0]  # drawn at print size even though the chart sits in a layout
+    assert (image.width(), image.height()) == (960, 560)
     data["images"] = {}
     text = build_html(data)
-    assert "FLEET RISK" in text and "Top actions" in text and "Highest-risk devices" in text
+    assert "Fleet risk" in text and "Top actions" in text and "Highest-risk devices" in text
     assert "Critical findings" in text
     w.close()

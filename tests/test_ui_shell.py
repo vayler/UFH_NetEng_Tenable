@@ -169,3 +169,132 @@ def test_remediation_view(window):
     window.overview.action_activated.emit(action_id)
     assert window.current_view() == "remediation" and view.current_action()["id"] == action_id
     assert view.items_model.rowCount() > 0
+
+
+# ---- shell: no menu bar, command palette, filter chips, counts --------------------------------------
+
+def test_no_menu_bar_commands_live_in_shortcuts_and_workspace_menu(window):
+    from PySide6.QtWidgets import QMenuBar, QWidget
+
+    assert window.findChild(QMenuBar) is None
+    # (window.actions is the remediation plan, so ask Qt for the window's QActions directly)
+    shortcuts = {a.shortcut().toString() for a in QWidget.actions(window)}
+    assert {"Ctrl+K", "Ctrl+P", "F5", "Ctrl+E", "Ctrl+Shift+E", "F11", "Ctrl+,", "Ctrl+1", "Ctrl+7"} <= shortcuts
+    texts = [a.text() for a in window.app_menu.actions()]
+    assert "Pull from Tenable…" in texts and "Settings…" in texts and "Quit" in texts
+
+
+def test_command_palette_mouse_and_keyboard(window):
+    from PySide6.QtTest import QTest
+
+    palette = window.command_palette
+    window.open_palette()
+    assert not palette.isHidden()
+    rows = palette.model.rows
+    assert rows[0].header and any(r.title == "Go to Findings" for r in rows)
+    assert not any(r.group == "Devices" for r in rows)  # targets only appear once you type
+
+    palette.input.setText("core-sw-01")
+    hits = [r for r in palette.model.rows if not r.header]
+    assert hits[0].title.startswith("Search findings for") and any(r.title == "core-sw-01" for r in hits)
+    row = next(i for i, r in enumerate(palette.model.rows) if r.title == "core-sw-01")
+    palette.activate(palette.model.index(row))
+    QApplication.processEvents()
+    assert palette.isHidden() and window.current_view() == "devices"
+    assert window.devices_tab.devices_model.frame.iloc[
+        window.devices_tab.devices_proxy.mapToSource(window.devices_tab.devices_view.currentIndex()).row()
+    ]["hostname"] == "core-sw-01"
+
+    window.open_palette()
+    QTest.keyClicks(palette.input, "trends")
+    QTest.keyClick(palette.input, Qt.Key_Down)  # past "Search findings for …" to the view
+    assert palette.list.currentIndex().data(Qt.UserRole).title == "Go to Trends"
+    QTest.keyClick(palette.input, Qt.Key_Return)
+    QApplication.processEvents()
+    assert window.current_view() == "trends"
+
+    window.open_palette()
+    QTest.keyClick(palette.input, Qt.Key_Escape)
+    assert palette.isHidden()
+    window.open_palette()
+    QTest.keyClicks(palette.input, "snmp")  # Enter on the first row searches the findings
+    QTest.keyClick(palette.input, Qt.Key_Return)
+    QApplication.processEvents()
+    assert window.current_view() == "findings" and window.findings_tab.search.text() == "snmp"
+
+
+def test_findings_filter_chips_summarise_filters(window):
+    tab = window.findings_tab
+    assert tab.severity_chip.text() == "Severity" and not tab.severity_chip.property("active")
+    assert tab.reset_button.isHidden()
+    for sev in ("medium", "low", "info"):
+        tab.sev_checks[sev].setChecked(False)
+    assert tab.severity_chip.text() == "Severity: Critical, High" and tab.severity_chip.property("active")
+    assert not tab.reset_button.isHidden()
+    tab.state_checks["FIXED"].setChecked(False)
+    assert tab.state_chip.text() == "State: Open, Reopened"
+    tab.min_vpr.setValue(7)
+    tab.apply_filters()
+    assert tab.vpr_chip.text() == "VPR: ≥ 7"
+    tab.reset_filters()
+    assert tab.severity_chip.text() == "Severity" and tab.vpr_chip.text() == "VPR" and tab.reset_button.isHidden()
+    assert tab.panel.proxy.rowCount() == 8
+
+
+def test_sidebar_counts(window):
+    from tenable_net.gui.app import COUNT_ROLE
+
+    assert window.nav_items["findings"].data(COUNT_ROLE) == f"{len(window.findings):,}"
+    assert window.nav_items["remediation"].data(COUNT_ROLE) == f"{len(window.actions):,}"
+    assert window.nav_items["devices"].data(COUNT_ROLE) == "5"  # 4 with findings + 1 asset without
+    assert not window.nav_items["hardware"].data(COUNT_ROLE)  # no inventory in this fixture
+
+
+def test_window_minimum_width_follows_the_visible_view(window):
+    window.navigate("overview")
+    overview_min = window.minimumSizeHint().width()
+    assert overview_min < 1000  # a wide view elsewhere doesn't stop the window shrinking
+    window.navigate("findings")
+    assert window.minimumSizeHint().width() >= overview_min
+
+
+def test_theme_switch_keeps_data(window):
+    try:
+        window.set_theme("dark")
+        assert theme.mode() == "dark" and window.theme_actions["dark"].isChecked()
+        assert window.overview.cards["critical"].value.text() == "3"
+        window.set_theme("light")
+        assert theme.mode() == "light"
+    finally:
+        window.set_theme("system")
+
+
+def test_bundled_inter_font_and_icons(app):
+    from tenable_net.gui import icons
+
+    assert (theme.FONT_DIR / "LICENSE.txt").exists() and len(list(theme.FONT_DIR.glob("Inter-*.otf"))) == 3
+    assert "Inter" in theme.load_fonts()
+    for name in icons.PATHS:
+        image = icons.pixmap(name, "#000000", 16).toImage()
+        assert any(image.pixelColor(x, y).alpha() for x in range(image.width()) for y in range(image.height())), name
+
+
+def test_every_view_paints_without_errors(window, monkeypatch):
+    """Delegates and custom widgets paint in Python; PySide only prints exceptions raised there, so collect
+    them through sys.excepthook and fail on any."""
+    import sys
+
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *exc: errors.append(exc))
+    window.resize(1280, 800)
+    window.show()
+    for key, *_rest in NAV:
+        window.navigate(key)
+        assert not window.grab().toImage().isNull()
+    window.open_palette()
+    window.command_palette.input.setText("core")
+    window.grab()
+    window.command_palette.close_palette()
+    window.notify("Saved")
+    window.grab()
+    assert errors == []

@@ -1,7 +1,8 @@
 """Main window and application entrypoint for the desktop app.
 
-Layout: a UF Health header (title, data freshness, source status, global search, primary actions),
-a navigation sidebar and one page per view. All jumps between views go through navigate().
+Layout: a quiet sidebar (workspace menu, search, navigation with counts, data-source status, settings)
+beside an inset content panel with a slim header (page title, Export, Present, Pull). Every command is
+also in the command palette (Ctrl+K) and the workspace menu. All jumps between views go through navigate().
 """
 
 import html
@@ -11,39 +12,64 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-from PySide6.QtCore import QFileSystemWatcher, QSettings, QSize, QStringListModel, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtCore import QFileSystemWatcher, QRectF, QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QCompleter, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QStyle, QStyledItemDelegate, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 from tenable_net import (
     __version__, akips, cisco, client, export, glossary, history, inventory, normalize, remediation, reports, risk,
 )
-from tenable_net.gui import theme
+from tenable_net.gui import icons, theme
 from tenable_net.gui.devices import DevicesTab
 from tenable_net.gui.dialogs import PullDialog, SettingsDialog
 from tenable_net.gui.findings import FindingsTab
 from tenable_net.gui.overview import OverviewTab
-from tenable_net.gui.widgets import Chip, Toast
+from tenable_net.gui.palette import CommandPalette, Entry, shortcut_keys
+from tenable_net.gui.widgets import (
+    Chip, Kbd, MenuButton, PageStack, SearchField, Toast, button, detail_css, elided, label,
+)
 
 APP_TITLE = "UF Health · Network Vulnerability Explorer"
-SIDEBAR_WIDTH = 224  # widened in presentation mode for the larger type
+WORKSPACE = "UF Health"
+SIDEBAR_WIDTH = 236  # widened in presentation mode for the larger type
 
-# (key, sidebar label, page title, page subtitle). Pages are created in MainWindow._build_pages.
+# (key, sidebar label, page title, page subtitle, icon). Pages are created in MainWindow._build_pages.
 NAV = [
-    ("overview", "Overview", "Overview", "Where the network stands right now"),
-    ("findings", "Findings", "Findings", "Every vulnerability Tenable reports, with filters and details"),
-    ("devices", "Devices", "Devices", "Risk, hardware and findings per device"),
-    ("remediation", "Remediation", "Remediation plan", "Fixes ranked by how much risk they remove"),
-    ("hardware", "Hardware & Contracts", "Hardware & contracts",
-     "Models, serials, software and Cisco contract status for every chassis"),
-    ("trends", "Trends", "Trends", "How exposure is changing from pull to pull"),
-    ("diagnostics", "Diagnostics", "Enrichment diagnostics", "Why devices are missing hardware or Cisco data"),
+    ("overview", "Overview", "Overview", "Where the network stands right now", "overview"),
+    ("findings", "Findings", "Findings", "Every vulnerability Tenable reports, with filters and details", "findings"),
+    ("devices", "Devices", "Devices", "Risk, hardware and findings per device", "devices"),
+    ("remediation", "Remediation", "Remediation plan", "Fixes ranked by how much risk they remove", "remediation"),
+    ("hardware", "Hardware", "Hardware & contracts",
+     "Models, serials, software and Cisco contract status for every chassis", "hardware"),
+    ("trends", "Trends", "Trends", "How exposure is changing from pull to pull", "trends"),
+    ("diagnostics", "Diagnostics", "Enrichment diagnostics", "Why devices are missing hardware or Cisco data",
+     "diagnostics"),
 ]
-NAV_INFO = {key: (title, subtitle) for key, _label, title, subtitle in NAV}
+NAV_INFO = {key: (title, subtitle, icon) for key, _label, title, subtitle, icon in NAV}
+NAV_SECTIONS = {"diagnostics": "Tools"}  # a caption above these items
 PRESENT_VIEWS = ("overview", "trends", "remediation", "hardware")
+
+COUNT_ROLE = Qt.UserRole + 10
+ICON_ROLE = Qt.UserRole + 11
+HEADER_ROLE = Qt.UserRole + 12
+
+SHORTCUTS = [
+    (("Ctrl", "K"), "Command palette: run a command or jump to a device, CVE or plugin"),
+    (("Ctrl", "F"), "Search the current view"),
+    (("Ctrl", "1 … 7"), "Go to a view"),
+    (("Ctrl", "P"), "Pull from Tenable"),
+    (("F5",), "Reload the cache"),
+    (("Ctrl", "E"), "Export the Excel report"),
+    (("Ctrl", "Shift", "E"), "Executive summary (PDF)"),
+    (("Ctrl", "Shift", "S"), "Save the current view as an image"),
+    (("F11",), "Presentation mode (Esc leaves)"),
+    (("Ctrl", ","), "Settings"),
+    (("Ctrl", "/"), "Keyboard shortcuts"),
+]
 
 
 def apply_theme(app, mode_name):
@@ -66,16 +92,228 @@ def _ago(iso):
     return text, hours
 
 
+# ---- sidebar pieces ------------------------------------------------------------------------------
+
+class NavDelegate(QStyledItemDelegate):
+    """Sidebar rows: rounded hover / selected background, icon, label, muted count; captions for sections."""
+
+    def sizeHint(self, option, index):
+        h = option.fontMetrics.height()
+        return QSize(option.rect.width(), h + (20 if index.data(HEADER_ROLE) else 14))
+
+    def paint(self, painter, option, index):
+        t = theme.tokens()
+        r = QRectF(option.rect)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        if index.data(HEADER_ROLE):
+            painter.setFont(theme.font("caption", weight="medium"))
+            painter.setPen(QColor(t["text_muted"]))
+            painter.drawText(r.adjusted(10, 0, -10, -4), Qt.AlignLeft | Qt.AlignBottom, index.data(Qt.DisplayRole))
+            painter.restore()
+            return
+        selected = bool(option.state & QStyle.State_Selected)
+        hover = bool(option.state & QStyle.State_MouseOver)
+        if selected or hover:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(t["active" if selected else "hover"]))
+            painter.drawRoundedRect(r.adjusted(0, 1, 0, -1), 6, 6)
+        strong = selected or hover
+        size = round(option.fontMetrics.height() * 0.95)
+        icons.paint(painter, index.data(ICON_ROLE) or "arrow-right",
+                    QRectF(r.left() + 10, r.center().y() - size / 2, size, size),
+                    t["text"] if selected else t["text_muted"])
+        font = theme.font("body", weight="medium" if selected else "regular")
+        painter.setFont(font)
+        right = r.right() - 10
+        count = index.data(COUNT_ROLE)
+        if count:
+            painter.setFont(theme.font("caption"))
+            w = painter.fontMetrics().horizontalAdvance(count)
+            painter.setPen(QColor(t["text_faint"] if not selected else t["text_muted"]))
+            painter.drawText(QRectF(right - w, r.top(), w, r.height()), Qt.AlignVCenter | Qt.AlignRight, count)
+            right -= w + 8
+            painter.setFont(font)
+        painter.setPen(QColor(t["text"] if strong else t["text_muted"]))
+        left = r.left() + 18 + size
+        painter.drawText(QRectF(left, r.top(), max(right - left, 0), r.height()), Qt.AlignVCenter | Qt.AlignLeft,
+                         painter.fontMetrics().elidedText(index.data(Qt.DisplayRole), Qt.ElideRight,
+                                                          int(max(right - left, 0))))
+        painter.restore()
+
+
+class _HoverButton(QPushButton):
+    """Flat button that paints itself and repaints on hover."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_Hover)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+
+class WorkspaceButton(_HoverButton):
+    """Workspace tile + name + chevron; opens the app menu."""
+
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.setToolTip("Network Vulnerability Explorer: commands, export, theme, settings")
+
+    def sizeHint(self):
+        return QSize(180, max(34, self.fontMetrics().height() + 16))
+
+    def paintEvent(self, _event):
+        t = theme.tokens()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        if self.underMouse() or self.isDown():
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(t["hover"]))
+            p.drawRoundedRect(r, 6, 6)
+        tile = QRectF(8, r.center().y() - 11, 22, 22)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(theme.BRAND["blue"]))
+        p.drawRoundedRect(tile, 6, 6)
+        p.setPen(QColor("#FFFFFF"))
+        f = theme.font("caption", weight="semibold")
+        f.setPixelSize(max(round(f.pixelSize() * 0.85), 8))
+        p.setFont(f)
+        p.drawText(tile, Qt.AlignCenter, "UF")
+        p.setFont(theme.font("body", weight="semibold"))
+        p.setPen(QColor(t["text"]))
+        w = p.fontMetrics().horizontalAdvance(self.name)
+        p.drawText(QRectF(38, 0, w + 2, r.height()), Qt.AlignVCenter | Qt.AlignLeft, self.name)
+        icons.paint(p, "chevron-down", QRectF(38 + w + 6, r.center().y() - 6, 12, 12), t["text_muted"])
+        p.end()
+
+
+class SearchButton(_HoverButton):
+    """Looks like a search box; opens the command palette."""
+
+    def sizeHint(self):
+        return QSize(180, max(30, self.fontMetrics().height() + 14))
+
+    def paintEvent(self, _event):
+        t = theme.tokens()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QColor(t["border_strong"] if self.underMouse() else t["border"]))
+        p.setBrush(QColor(t["surface"]))
+        p.drawRoundedRect(r, 6, 6)
+        icons.paint(p, "search", QRectF(10, r.center().y() - 7.5, 15, 15), t["text_faint"])
+        p.setFont(theme.font("body"))
+        p.setPen(QColor(t["text_muted"]))
+        p.drawText(QRectF(32, 0, r.width() - 90, r.height()), Qt.AlignVCenter | Qt.AlignLeft, "Search…")
+        p.setFont(theme.font("caption", weight="medium"))
+        x = r.right() - 7
+        for key in ("K", "Ctrl"):
+            w = max(p.fontMetrics().horizontalAdvance(key) + 10, 18)
+            cap = QRectF(x - w, r.center().y() - 9, w, 18)
+            p.setPen(QColor(t["kbd_border"]))
+            p.setBrush(QColor(t["kbd_bg"]))
+            p.drawRoundedRect(cap, 4, 4)
+            p.setPen(QColor(t["kbd_text"]))
+            p.drawText(cap, Qt.AlignCenter, key)
+            x -= w + 3
+        p.end()
+
+
+class NavButton(_HoverButton):
+    """A sidebar row outside the view list (Settings)."""
+
+    def __init__(self, text, icon_name, parent=None):
+        super().__init__(parent)
+        self.text_, self.icon_name = text, icon_name
+
+    def sizeHint(self):
+        return QSize(180, self.fontMetrics().height() + 14)
+
+    def paintEvent(self, _event):
+        t = theme.tokens()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        hover = self.underMouse()
+        if hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(t["hover"]))
+            p.drawRoundedRect(r, 6, 6)
+        size = round(self.fontMetrics().height() * 0.95)
+        icons.paint(p, self.icon_name, QRectF(10, r.center().y() - size / 2, size, size), t["text_muted"])
+        p.setFont(theme.font("body"))
+        p.setPen(QColor(t["text"] if hover else t["text_muted"]))
+        p.drawText(QRectF(18 + size, 0, r.width(), r.height()), Qt.AlignVCenter | Qt.AlignLeft, self.text_)
+        p.end()
+
+
+# ---- dialogs ----------------------------------------------------------------------------------------
+
 class GlossaryDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Glossary")
-        self.resize(640, 620)
-        view = QTextBrowser()
-        view.setHtml("".join(f"<h4 style='margin-bottom:2px'>{html.escape(k)}</h4><p style='margin-top:0'>"
-                             f"{html.escape(v)}</p>" for k, v in glossary.TERMS.items()))
-        QVBoxLayout(self).addWidget(view)
+        self.resize(620, 640)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+        layout.addWidget(label("Glossary", "headline"))
+        layout.addWidget(label("Plain-English definitions of the terms used across the app.", "body", "Muted"))
+        self.search = SearchField("Filter terms…")
+        self.search.textChanged.connect(self.render)
+        self.view = QTextBrowser()
+        layout.addWidget(self.search)
+        layout.addWidget(self.view, 1)
+        self.render()
 
+    def render(self, *_):
+        words = self.search.text().lower().split()
+        terms = [(k, v) for k, v in glossary.TERMS.items() if all(w in f"{k} {v}".lower() for w in words)]
+        self.view.document().setDefaultStyleSheet(detail_css())
+        self.view.setHtml("".join(f"<p style='margin-bottom:12px'><b>{html.escape(k)}</b><br>"
+                                  f"<span class='muted'>{html.escape(v)}</span></p>" for k, v in terms)
+                          or "<p class='muted'>No matching terms.</p>")
+
+
+class ShortcutsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard shortcuts")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        layout.addWidget(label("Keyboard shortcuts", "headline"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(10)
+        for row, (keys, text) in enumerate(SHORTCUTS):
+            grid.addWidget(label(text), row, 0)
+            caps = QHBoxLayout()
+            caps.setSpacing(4)
+            caps.addStretch(1)
+            for key in keys:
+                caps.addWidget(Kbd(key))
+            grid.addLayout(caps, row, 1)
+        layout.addLayout(grid)
+        close = button("Close")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        layout.addLayout(row)
+
+
+# ---- main window ----------------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self, cache_dir=export.DEFAULT_CACHE_DIR):
@@ -92,41 +330,52 @@ class MainWindow(QMainWindow):
         self.actions, self.action_members = pd.DataFrame(), {}
         self._cache_signature = None
         self._pending = {}  # view key -> loads the latest data into a view that hasn't been shown yet
+        self._palette_targets = None
+        self.presenting = False
+        self.search_targets = {}
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
 
         self.toast = None
         self._build_pages()
+        self._build_actions()
         sidebar = self._build_sidebar()
-        topbar = self._build_header()
-        self.stack = QStackedWidget()  # 0 = getting started (no data), 1 = pages
+        header = self._build_header()
+        self.stack = PageStack()  # 0 = getting started (no data), 1 = pages
         self.stack.addWidget(self._empty_page())
-        content_page = QWidget()
-        content_layout = QVBoxLayout(content_page)
-        content_layout.setContentsMargins(20, 16, 20, 12)
-        content_layout.addWidget(self.pages)
-        self.stack.addWidget(content_page)
+        pages_box = QWidget()
+        pages_layout = QVBoxLayout(pages_box)
+        pages_layout.setContentsMargins(1, 0, 1, 8)  # keeps full-width tables inside the rounded corners
+        pages_layout.addWidget(self.pages)
+        self.stack.addWidget(pages_box)
+        content = QFrame()
+        content.setObjectName("ContentPanel")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(header)
+        content_layout.addWidget(self.stack, 1)
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-        right_layout.addWidget(topbar)
-        right_layout.addWidget(self.stack, 1)
+        right_layout.setContentsMargins(0, 8, 8, 8)
+        right_layout.addWidget(content)
         central = QWidget()
+        central.setObjectName("AppRoot")
         outer = QHBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(sidebar)
         outer.addWidget(right, 1)
         self.setCentralWidget(central)
+        self.command_palette = CommandPalette(self, fallback=lambda text: self.navigate("findings", text=text))
         self.nav.setCurrentRow(0)
         self._page_changed(0)
 
-        self._build_actions()
-        self.status_label = QLabel()
-        self.statusBar().addWidget(self.status_label, 1)
         self.findings_tab.count_changed.connect(self._update_status)
         self.toast = Toast(self)
+        self._theme_mode = theme.mode()
+        theme.signals.changed.connect(self._retheme)
+        self._follows_theme = True
 
         self._fresh_timer = QTimer(self, interval=60_000)
         self._fresh_timer.timeout.connect(self._update_header)
@@ -176,7 +425,7 @@ class MainWindow(QMainWindow):
         self.overview.plugin_activated.connect(lambda p: self.navigate("findings", text=p))
         self.overview.severity_activated.connect(lambda s: self.navigate("findings", severity=s))
         self.overview.view_requested.connect(lambda view, filters: self.navigate(view, **filters))
-        self.pages = QStackedWidget()
+        self.pages = PageStack()
         self.remediation_view.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
         self.overview.action_activated.connect(lambda a: self.navigate("remediation", action=a))
         self.hardware_view.device_activated.connect(lambda h: self.navigate("devices", hostname=h))
@@ -190,110 +439,88 @@ class MainWindow(QMainWindow):
         self.tabs = self.pages  # older name, still used by scripts
 
     def _build_header(self):
-        """White top bar over the content: page title, status indicators, search and actions."""
+        """Slim bar across the top of the content panel: page icon, title, subtitle and the main actions."""
         bar = QFrame()
-        bar.setObjectName("TopBar")
+        bar.setObjectName("PageHeader")
+        bar.setMinimumHeight(50)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(10)
-        titles = QVBoxLayout()
-        titles.setSpacing(0)
-        self.page_title = QLabel()
-        self.page_title.setObjectName("PageTitle")
-        theme.set_font(self.page_title, "title", bold=True)
-        self.page_subtitle = QLabel()
-        self.page_subtitle.setObjectName("PageSubtitle")
-
-        titles.addWidget(self.page_title)
-        titles.addWidget(self.page_subtitle)
-        layout.addLayout(titles)
+        layout.setContentsMargins(18, 8, 10, 8)
+        layout.setSpacing(8)
+        self.page_icon = QLabel()
+        self.page_icon.setFixedSize(16, 16)
+        self.page_title = label("", "title", "PageTitle")
+        self.page_subtitle = elided("", "body", "PageSubtitle")
+        layout.addWidget(self.page_icon)
+        layout.addSpacing(2)
+        layout.addWidget(self.page_title)
+        layout.addSpacing(6)
+        layout.addWidget(self.page_subtitle)
         layout.addStretch(1)
 
-        self.global_search = QLineEdit(placeholderText="Search devices, CVEs, plugins…   Ctrl+K")
-        self.global_search.setMinimumWidth(200)
-        self.global_search.setMaximumWidth(320)
-        self.global_search.setClearButtonEnabled(True)
-        self.global_search.setFocusPolicy(Qt.ClickFocus)  # don't grab focus at start-up; Ctrl+K focuses it
-        self.search_model = QStringListModel(self)
-        completer = QCompleter(self.search_model, self)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchContains)
-        completer.setMaxVisibleItems(15)
-        completer.activated.connect(self._search_activated)
-        self.global_search.setCompleter(completer)
-        self.global_search.returnPressed.connect(lambda: self._search_activated(self.global_search.text()))
-        self.search_targets = {}
-        layout.addWidget(self.global_search)
-
-        self.report_button = QPushButton("Export")  # Qt draws the menu arrow
+        self.report_button = MenuButton("Export", variant="ghost")
+        self.report_button.setToolTip("Excel report, executive summary (PDF), or this view as an image")
         export_menu = QMenu(self.report_button)
-        export_menu.addAction("Excel report (all sheets)", self.export_report)
-        export_menu.addAction("Executive summary (PDF)…", self.export_summary)
-        export_menu.addAction("Current view as image (PNG)…", self.export_view_image)
+        for action in (self.report_action, self.summary_action, self.image_action):
+            export_menu.addAction(action)
         self.report_button.setMenu(export_menu)
-        self.present_button = QPushButton("Present")
-        self.present_button.setToolTip("Presentation mode for meetings (F11): larger type, summary views only")
+        self.present_button = button("Present", "ghost", "present",
+                                     "Presentation mode for meetings (F11): larger type, summary views only")
         self.present_button.clicked.connect(self.toggle_presentation)
-        self.pull_button = QPushButton("Pull from Tenable")
-        self.pull_button.setObjectName("Primary")
+        self.pull_button = button("Pull from Tenable", "primary", "pull", "Pull fresh data from Tenable (Ctrl+P)")
         self.pull_button.clicked.connect(self.pull)
-        for b in (self.report_button, self.present_button, self.pull_button):
+        for b in (self.report_button, self.present_button):
             layout.addWidget(b)
+        layout.addSpacing(4)
+        layout.addWidget(self.pull_button)
         return bar
 
     def _build_sidebar(self):
-        """Navy sidebar: UF Health brand block, navigation, settings and version."""
+        """Workspace menu, search, views with counts, data-source status, settings."""
         sidebar = self.sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(0, 18, 0, 12)
-        layout.setSpacing(0)
-        brand = QLabel("UF Health")
-        brand.setObjectName("BrandName")
-        theme.set_font(brand, "brand", bold=True)
-        product = QLabel("Network Vulnerability Explorer")
-        theme.set_font(product, "caption")
-        for widget in (brand, product):
-            widget.setContentsMargins(20, 0, 12, 0)
-        layout.addWidget(brand)
-        layout.addWidget(product)
+        layout.setContentsMargins(10, 10, 8, 10)
+        layout.setSpacing(2)
+        self.workspace_button = WorkspaceButton(WORKSPACE)
+        self.workspace_button.clicked.connect(self._show_app_menu)
+        layout.addWidget(self.workspace_button)
+        layout.addSpacing(6)
+        self.search_button = SearchButton()
+        self.search_button.setToolTip("Search devices, CVEs, plugins, models and serials, or run a command (Ctrl+K)")
+        self.search_button.clicked.connect(self.open_palette)
+        layout.addWidget(self.search_button)
         layout.addSpacing(10)
-        accent = QFrame()
-        accent.setObjectName("BrandAccent")
-        accent.setFixedSize(28, 3)
-        accent_row = QHBoxLayout()
-        accent_row.setContentsMargins(20, 0, 0, 0)
-        accent_row.addWidget(accent)
-        accent_row.addStretch(1)
-        layout.addLayout(accent_row)
-        layout.addSpacing(22)
-        caption = QLabel("VIEWS")
-        caption.setObjectName("SidebarCaption")
-        theme.set_font(caption, "caption", bold=True)
-        caption.setContentsMargins(26, 0, 0, 6)
-        layout.addWidget(caption)
 
         self.nav = QListWidget()
-        self.nav.setObjectName("Nav")
+        self.nav.setObjectName("NavList")
         self.nav.setFocusPolicy(Qt.NoFocus)
-        for key, label, *_rest in NAV:
-            item = QListWidgetItem(label)
+        self.nav.setMouseTracking(True)
+        self.nav.viewport().setAttribute(Qt.WA_Hover)
+        self.nav.setItemDelegate(NavDelegate(self.nav))
+        self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav_items = {}
+        for key, nav_label, _title, _sub, icon in NAV:
+            if key in NAV_SECTIONS:
+                header = QListWidgetItem(NAV_SECTIONS[key])
+                header.setData(HEADER_ROLE, True)
+                header.setFlags(Qt.NoItemFlags)
+                self.nav.addItem(header)
+            item = QListWidgetItem(nav_label)
             item.setData(Qt.UserRole, key)
-            item.setSizeHint(QSize(0, 38))
+            item.setData(ICON_ROLE, icon)
             self.nav.addItem(item)
-        self.nav.currentRowChanged.connect(self._nav_changed)
+            self.nav_items[key] = item
+        self.nav.currentItemChanged.connect(self._nav_changed)
         self.pages.currentChanged.connect(self._page_changed)
-        self.nav.setFixedHeight(len(NAV) * 40 + 8)
         layout.addWidget(self.nav)
+        self._fit_nav()
         layout.addStretch(1)
 
-        # data freshness + source status: quiet dot + label rows; click for details
-        sources = QLabel("DATA SOURCES")
-        sources.setObjectName("SidebarCaption")
-        theme.set_font(sources, "caption", bold=True)
-        sources.setContentsMargins(26, 0, 0, 4)
+        sources = label("Data sources", "caption", "SidebarCaption", weight="medium")
         layout.addWidget(sources)
+        layout.addSpacing(2)
         self.fresh_chip = Chip("No data")
         self.fresh_chip.clicked.connect(self.pull)
         self.source_chips = {name: Chip(name) for name in ("Tenable", "AKiPS", "Cisco")}
@@ -301,125 +528,169 @@ class MainWindow(QMainWindow):
         self.source_chips["AKiPS"].clicked.connect(lambda: self.navigate("diagnostics"))
         self.source_chips["Cisco"].clicked.connect(lambda: self.navigate("diagnostics"))
         for chip in (self.fresh_chip, *self.source_chips.values()):
-            chip.setObjectName("SidebarStatus")
-            chip.setCursor(Qt.PointingHandCursor)
             layout.addWidget(chip)
-        layout.addSpacing(12)
-
-        settings = QListWidget()
-        settings.setObjectName("Nav")
-        settings.setFocusPolicy(Qt.NoFocus)
-        settings_item = QListWidgetItem("Settings")
-        settings_item.setSizeHint(QSize(0, 38))
-        settings.addItem(settings_item)
-        settings.setFixedHeight(46)
-        settings.itemClicked.connect(lambda _item: (settings.clearSelection(), self.open_settings()))
-        layout.addWidget(settings)
-        version = QLabel(f"Network Engineering · v{__version__}")
-        version.setObjectName("SidebarVersion")
-        theme.set_font(version, "caption")
-        version.setContentsMargins(26, 8, 0, 0)
+        layout.addSpacing(8)
+        self.settings_button = NavButton("Settings", "settings")
+        self.settings_button.setToolTip("Tenable, AKiPS and Cisco connections (Ctrl+,)")
+        self.settings_button.clicked.connect(self.open_settings)
+        layout.addWidget(self.settings_button)
+        version = label(f"v{__version__} · Network Engineering", "caption", "SidebarVersion")
+        version.setContentsMargins(10, 6, 0, 0)
         layout.addWidget(version)
         return sidebar
+
+    def _fit_nav(self):
+        height = sum(self.nav.sizeHintForRow(r) for r in range(self.nav.count()) if not self.nav.item(r).isHidden())
+        self.nav.setFixedHeight(height + 4)
 
     def _empty_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addStretch(1)
+        layout.addStretch(2)
         card = QFrame()
-        card.setObjectName("Card")
-        card.setMaximumWidth(560)
+        card.setObjectName("EmptyCard")
+        card.setFixedWidth(500)
         inner = QVBoxLayout(card)
-        inner.setContentsMargins(28, 24, 28, 24)
-        title = QLabel("Getting started")
-        theme.set_font(title, "headline", bold=True)
+        inner.setContentsMargins(28, 26, 28, 24)
+        inner.setSpacing(8)
+        self.empty_icon = QLabel()
+        self.empty_icon.setFixedSize(40, 40)
+        self.empty_icon.setAlignment(Qt.AlignCenter)
+        inner.addWidget(self.empty_icon)
+        inner.addSpacing(6)
+        inner.addWidget(label("Get started", "headline"))
+        self.empty_note = label("Pull your findings from Tenable to see where the network stands.", "body", "Muted",
+                                wrap=True)
+        inner.addWidget(self.empty_note)
+        inner.addSpacing(4)
         self.checklist = QLabel()
         self.checklist.setTextFormat(Qt.RichText)
         self.checklist.setWordWrap(True)
-        pull = QPushButton("Pull from Tenable…")
-        pull.setObjectName("Primary")
-        pull.setMinimumHeight(34)
-        pull.clicked.connect(self.pull)
-        keys = QPushButton("Settings (API keys)…")
-        keys.clicked.connect(self.open_settings)
-        inner.addWidget(title)
         inner.addWidget(self.checklist)
+        inner.addSpacing(10)
+        pull = button("Pull from Tenable…", "primary", "pull")
+        pull.clicked.connect(self.pull)
+        keys = button("Settings…", icon_name="settings")
+        keys.clicked.connect(self.open_settings)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addWidget(pull)
         buttons.addWidget(keys)
+        buttons.addStretch(1)
         inner.addLayout(buttons)
         layout.addWidget(card, alignment=Qt.AlignCenter)
-        layout.addStretch(2)
+        layout.addStretch(3)
+        self._retheme_empty()
         return page
 
+    def _retheme_empty(self):
+        t = theme.tokens()
+        self.empty_icon.setPixmap(icons.pixmap("database", t["text_muted"], 20))
+        self.empty_icon.setStyleSheet(f"background: {t['surface_alt']}; border: 1px solid {t['border']}; "
+                                      "border-radius: 10px;")
+
+    def _action(self, text, slot, shortcut=None, icon_name=None, checkable=False):
+        action = QAction(text, self)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        if checkable:
+            action.setCheckable(True)
+            action.triggered.connect(lambda _c=False: slot())
+        else:
+            action.triggered.connect(lambda _c=False: slot())
+        action.setProperty("icon_name", icon_name or "")
+        self.addAction(action)  # shortcuts work without a menu bar
+        return action
+
     def _build_actions(self):
-        self.pull_action = QAction("Pull from Tenable…", self, shortcut=QKeySequence("Ctrl+P"))
-        self.pull_action.triggered.connect(self.pull)
-        self.reload_action = QAction("Reload cache", self, shortcut=QKeySequence.Refresh)
-        self.reload_action.triggered.connect(self.reload)
-        self.report_action = QAction("Export full report", self, shortcut=QKeySequence("Ctrl+E"))
-        self.report_action.triggered.connect(self.export_report)
-        self.summary_action = QAction("Executive summary (PDF)…", self, shortcut=QKeySequence("Ctrl+Shift+E"))
-        self.summary_action.triggered.connect(self.export_summary)
-        self.image_action = QAction("Save current view as image…", self, shortcut=QKeySequence("Ctrl+Shift+S"))
-        self.image_action.triggered.connect(self.export_view_image)
-        self.present_action = QAction("Presentation mode", self, shortcut=QKeySequence("F11"), checkable=True)
-        self.present_action.triggered.connect(lambda _c: self.toggle_presentation())
-        self.addAction(self.present_action)
-        self.settings_action = QAction("Settings…", self)
-        self.settings_action.triggered.connect(self.open_settings)
-        for text, keys, slot in (("Find", QKeySequence.Find, self.focus_search),
-                                 ("Search everything", QKeySequence("Ctrl+K"), self.focus_global_search)):
-            act = QAction(text, self, shortcut=keys)
-            act.triggered.connect(slot)
-            self.addAction(act)
-
-        file_menu = self.menuBar().addMenu("&File")
-        for action in (self.pull_action, self.reload_action, self.report_action, self.summary_action,
-                       self.image_action, self.settings_action):
-            file_menu.addAction(action)
-        file_menu.addSeparator()
-        file_menu.addAction("Quit", QKeySequence.Quit, self.close)
-
-        view_menu = self.menuBar().addMenu("&View")
-        for i, (key, label, *_rest) in enumerate(NAV, start=1):
-            act = QAction(label, self, shortcut=QKeySequence(f"Ctrl+{i}"))
-            act.triggered.connect(lambda _=False, k=key: self.navigate(k))
-            view_menu.addAction(act)
-        view_menu.addSeparator()
-        view_menu.addAction(self.present_action)
-        theme_menu = view_menu.addMenu("Theme")
-        group = QActionGroup(self)
-        current = self.settings.value("theme", "system")
-        for name in ("system", "light", "dark"):
-            act = QAction(name.title(), self, checkable=True, checked=name == current)
-            act.triggered.connect(lambda _=False, t=name: self.set_theme(t))
-            group.addAction(act)
-            theme_menu.addAction(act)
-
-        tools_menu = self.menuBar().addMenu("&Tools")
-        self.diagnostics_action = tools_menu.addAction("Enrichment diagnostics", self.open_diagnostics)
+        self.pull_action = self._action("Pull from Tenable…", self.pull, "Ctrl+P", "pull")
+        self.reload_action = self._action("Reload cache", self.reload, QKeySequence.Refresh, "reload")
+        self.report_action = self._action("Excel report (all sheets)", self.export_report, "Ctrl+E", "file")
+        self.summary_action = self._action("Executive summary (PDF)…", self.export_summary, "Ctrl+Shift+E", "file")
+        self.image_action = self._action("Current view as image (PNG)…", self.export_view_image, "Ctrl+Shift+S",
+                                         "image")
+        self.present_action = self._action("Presentation mode", self.toggle_presentation, "F11", "present",
+                                           checkable=True)
+        self.settings_action = self._action("Settings…", self.open_settings, "Ctrl+,", "settings")
+        self.diagnostics_action = self._action("Enrichment diagnostics", self.open_diagnostics, None, "diagnostics")
         self.diagnostics_action.setToolTip("Why devices are missing hardware / Cisco data")
+        self.palette_action = self._action("Command palette…", self.open_palette, "Ctrl+K", "search")
+        self.find_action = self._action("Find", self.focus_search, QKeySequence.Find)
+        self.shortcuts_action = self._action("Keyboard shortcuts", lambda: ShortcutsDialog(self).exec(), "Ctrl+/",
+                                             "keyboard")
+        self.glossary_action = self._action("Glossary", lambda: GlossaryDialog(self).exec(), None, "book")
+        self.about_action = self._action("About", self.about, None, "info")
+        self.quit_action = self._action("Quit", self.close, "Ctrl+Q", "power")
+        self.view_actions = {}
+        for i, (key, nav_label, *_rest) in enumerate(NAV, start=1):
+            self.view_actions[key] = self._action(f"Go to {nav_label}", lambda k=key: self.navigate(k), f"Ctrl+{i}",
+                                                  _rest[-1])
+        self.theme_group = QActionGroup(self)
+        current = self.settings.value("theme", "system")
+        self.theme_actions = {}
+        for name, icon_name in (("system", "monitor"), ("light", "sun"), ("dark", "moon")):
+            act = QAction(name.title(), self, checkable=True, checked=name == current)
+            act.setProperty("icon_name", icon_name)
+            act.triggered.connect(lambda _=False, t=name: self.set_theme(t))
+            self.theme_group.addAction(act)
+            self.theme_actions[name] = act
 
-        help_menu = self.menuBar().addMenu("&Help")
-        help_menu.addAction("Glossary", lambda: GlossaryDialog(self).exec())
-        help_menu.addAction("About", lambda: QMessageBox.about(
-            self, "About", f"<b>{APP_TITLE}</b><br>tenable_net {__version__}<br>"
-                           "Tenable vulnerability explorer for UF Health network equipment."))
+        menu = self.app_menu = QMenu(self)
+        for action in (self.pull_action, self.reload_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        export_menu = menu.addMenu("Export")
+        export_menu.setProperty("icon_name", "export")
+        self._export_submenu = export_menu
+        for action in (self.report_action, self.summary_action, self.image_action):
+            export_menu.addAction(action)
+        menu.addAction(self.present_action)
+        theme_menu = menu.addMenu("Theme")
+        self._theme_submenu = theme_menu
+        for act in self.theme_actions.values():
+            theme_menu.addAction(act)
+        menu.addSeparator()
+        menu.addAction(self.settings_action)
+        menu.addAction(self.diagnostics_action)
+        menu.addSeparator()
+        for action in (self.palette_action, self.shortcuts_action, self.glossary_action, self.about_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction(self.quit_action)
+        self._tint_actions()
+
+    def _tint_actions(self):
+        t = theme.tokens()
+        for action in self.findChildren(QAction):
+            name = action.property("icon_name")
+            if name:
+                action.setIcon(icons.icon(name, t["text_muted"]))
+        self._export_submenu.setIcon(icons.icon("export", t["text_muted"]))
+        self._theme_submenu.setIcon(icons.icon("sun" if theme.mode() == "light" else "moon", t["text_muted"]))
+
+    def _show_app_menu(self):
+        self.app_menu.exec(self.workspace_button.mapToGlobal(self.workspace_button.rect().bottomLeft()))
+
+    def about(self):
+        QMessageBox.about(self, "About", f"<b>{APP_TITLE}</b><br>tenable_net {__version__}<br>"
+                                         "Tenable vulnerability explorer for UF Health network equipment.<br><br>"
+                                         "Set in Inter (SIL Open Font License).")
 
     # ---- navigation -------------------------------------------------------------
-    def _nav_changed(self, row):
-        item = self.nav.item(row)
-        if item is not None:
+    def _nav_changed(self, item, _previous=None):
+        if item is not None and item.data(Qt.UserRole):
             self.show_view(item.data(Qt.UserRole))
 
     def _page_changed(self, index):
+        key = self.view_keys[index]
         self.nav.blockSignals(True)
-        self.nav.setCurrentRow(index)
+        self.nav.setCurrentItem(self.nav_items[key])
         self.nav.blockSignals(False)
-        title, subtitle = NAV_INFO[self.view_keys[index]]
+        self.nav.viewport().update()
+        title, subtitle, icon_name = NAV_INFO[key]
         self.page_title.setText(title)
         self.page_subtitle.setText(subtitle)
+        self.page_icon.setPixmap(icons.pixmap(icon_name, theme.tokens()["text_muted"], 16))
 
     def current_view(self):
         return self.view_keys[self.pages.currentIndex()]
@@ -495,18 +766,19 @@ class MainWindow(QMainWindow):
         return self.navigate("diagnostics")
 
     def focus_search(self):
-        if self.current_view() == "devices":
-            self.devices_tab.search.setFocus()
-        else:
+        """Ctrl+F: the current view's own search box (Findings when the view has none)."""
+        page = self.pages.currentWidget()
+        search = getattr(page, "search", None)
+        if search is None or self.current_view() in ("overview", "trends"):
             self.navigate("findings")
-            self.findings_tab.search.setFocus()
-            self.findings_tab.search.selectAll()
+            search = self.findings_tab.search
+        search.setFocus()
+        search.selectAll()
 
     def focus_global_search(self):
-        self.global_search.setFocus()
-        self.global_search.selectAll()
+        self.open_palette()
 
-    # ---- global search ------------------------------------------------------------
+    # ---- command palette + search targets -------------------------------------------
     def _build_search_index(self):
         targets = {}
         f = self.findings
@@ -529,7 +801,7 @@ class MainWindow(QMainWindow):
                 if serial:
                     targets[f"Serial · {serial} · {host}"] = ("devices", {"hostname": host})
         self.search_targets = targets
-        self.search_model.setStringList(sorted(targets))
+        self._palette_targets = None
 
     def _search_activated(self, text):
         text = (text or "").strip()
@@ -545,15 +817,71 @@ class MainWindow(QMainWindow):
                 page.search.setText(kwargs["search"])
             else:
                 self.navigate(view, **kwargs)
-        QTimer.singleShot(0, self.global_search.clear)
+
+    def _target_entries(self):
+        if self._palette_targets is None:
+            kinds = {"Device": ("Devices", "devices"), "CVE": ("CVEs", "shield"), "Plugin": ("Plugins", "code"),
+                     "Model": ("Models", "hardware"), "Serial": ("Serials", "hash")}
+            entries = []
+            for key in self.search_targets:
+                kind, _, rest = key.partition(" · ")
+                group, icon_name = kinds.get(kind, (kind, "arrow-right"))
+                if kind == "Plugin":
+                    pid, _, name = rest.partition(" · ")
+                    title, subtitle = name or pid, f"Plugin {pid}"
+                elif kind == "Serial":
+                    title, _, subtitle = rest.partition(" · ")
+                else:
+                    title, subtitle = rest, kind
+                entries.append(Entry(title, group, icon_name, subtitle, run=lambda k=key: self._search_activated(k)))
+            self._palette_targets = entries
+        return self._palette_targets
+
+    def palette_entries(self):
+        entries = [Entry(f"Go to {nav_label}", "Go to", icon_name, keys=shortcut_keys(self.view_actions[key].shortcut()),
+                         run=lambda k=key: self.navigate(k))
+                   for key, nav_label, _t, _s, icon_name in NAV
+                   if not self.presenting or key in PRESENT_VIEWS]
+        commands = [self.pull_action, self.reload_action, self.report_action, self.summary_action, self.image_action,
+                    self.present_action, self.settings_action, self.shortcuts_action, self.glossary_action,
+                    self.about_action]
+        for action in commands:
+            if action.isEnabled():
+                entries.append(Entry(action.text().replace("…", ""), "Commands", action.property("icon_name") or
+                                     "arrow-right", keys=shortcut_keys(action.shortcut()), run=action.trigger))
+        for name, act in self.theme_actions.items():
+            entries.append(Entry(f"Theme: {name.title()}", "Commands", act.property("icon_name"), run=act.trigger))
+        return entries + self._target_entries()
+
+    def open_palette(self):
+        self.command_palette.open(self.palette_entries())
 
     # ---- theme ---------------------------------------------------------------------
     def set_theme(self, mode_name):
         self.settings.setValue("theme", mode_name)
-        theme.apply(QApplication.instance(), mode_name)
+        if mode_name in self.theme_actions:
+            self.theme_actions[mode_name].setChecked(True)
+        theme.apply(QApplication.instance(), mode_name, presentation=self.presenting)
+
+    def _retheme(self, mode_name=None):
+        """The theme changed: re-tint icons and rebuild anything that baked colours in. Presentation mode
+        re-applies the same light/dark mode (and reloads anyway), so it only needs the cheap part."""
+        self._tint_actions()
+        self._retheme_empty()
+        self._page_changed(self.pages.currentIndex())
         self._update_header()
+        self._update_checklist()
+        if mode_name == self._theme_mode:
+            return
+        self._theme_mode = mode_name
         if not self.findings.empty:
             self.overview.set_data(self.findings, self.inventory)  # charts pick up theme colours when built
+            self.overview.set_history(self.changes, self.history_series)
+            self.overview.set_actions(self.actions)
+        for view in self.views.values():
+            if hasattr(view, "refresh_theme") and view is not self.overview:
+                view.refresh_theme()
+        self.update()
 
     # ---- data ---------------------------------------------------------------------
     def _watch_paths(self):
@@ -578,6 +906,11 @@ class MainWindow(QMainWindow):
             self.reload()
             self.notify("Data updated from the cache folder.")
 
+    def _set_data_actions(self, enabled):
+        for widget in (self.report_action, self.summary_action, self.image_action, self.report_button,
+                       self.present_button, self.present_action):
+            widget.setEnabled(enabled)
+
     def reload(self):
         self._rewatch()
         self._cache_signature = self._signature()
@@ -586,11 +919,11 @@ class MainWindow(QMainWindow):
             vulns, assets, self.meta = export.load_cache(self.cache_dir)
         except FileNotFoundError:
             self.stack.setCurrentIndex(0)
-            self.report_action.setEnabled(False)
-            self.report_button.setEnabled(False)
-            self.present_button.setEnabled(False)
-            self.status_label.setText(f"No cached data in {self.cache_dir.resolve()}")
+            self._set_data_actions(False)
+            self.empty_note.setText("Pull your findings from Tenable to see where the network stands.")
+            self.empty_note.setToolTip(f"Nothing is cached in {self.cache_dir.resolve()} yet.")
             self._update_header()
+            self._update_counts()
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -624,16 +957,14 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.stack.setCurrentIndex(1)
-        self.report_action.setEnabled(True)
-        self.report_button.setEnabled(True)
-        self.present_button.setEnabled(True)
+        self._set_data_actions(True)
         self._update_status()
         self._update_header()
 
     def _load_devices(self, findings, vulns, assets):
         view = self.views["devices"]
-        view.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
         view.history_dir = self.cache_dir
+        view.set_data(findings, self.assets, self.inventory, self._enrichment_status(vulns, assets))
 
     def _load_history(self, findings=None):
         """Make sure history exists (backfill on first run), then return (changes, series)."""
@@ -655,6 +986,13 @@ class MainWindow(QMainWindow):
             return {}
         return {r["hostname"]: (r["stage"], r["reason"]) for _, r in devices.iterrows()}
 
+    def _scope_text(self):
+        filters = self.meta.get("filters") or {}
+        sev = ", ".join(filters.get("severity") or []) or "all"
+        state = ", ".join(filters.get("state") or []) or "all"
+        since = f" · last {filters['since_days']} days" if filters.get("since_days") else ""
+        return f"Severity: {sev} · state: {state}{since}"
+
     def _update_header(self):
         text, hours = _ago(self.meta.get("pulled_at"))
         if text is None:
@@ -662,27 +1000,30 @@ class MainWindow(QMainWindow):
         else:
             status = "good" if hours < 24 else ("warn" if hours < 24 * 7 else "bad")
             self.fresh_chip.set(f"Pulled {text}", status,
-                                f"Last pull: {self.meta.get('pulled_at')}. Amber after 24 h, red after 7 days. "
-                                "Click to pull again.")
+                                f"Last pull: {self.meta.get('pulled_at')}<br>{html.escape(self._scope_text())}<br>"
+                                "Amber after 24 h, red after 7 days. Click to pull again.")
         access, secret = client.saved_credentials()
         self.source_chips["Tenable"].set("Tenable", "good" if access and secret else "bad",
                                          "Tenable API keys saved" if access and secret else
-                                         "No Tenable API keys: click to open Settings")
+                                         "No Tenable API keys: click to open Settings",
+                                         "" if access and secret else "no keys")
         if akips.configured():
             rows, _ = inventory._read(self.cache_dir, inventory.AKIPS_FILE)
             self.source_chips["AKiPS"].set("AKiPS", "good" if rows else "warn",
                                            f"{len(rows):,} chassis from AKiPS" if rows else
-                                           "Configured; no inventory pulled yet")
+                                           "Configured; no inventory pulled yet",
+                                           f"{len(rows):,} chassis" if rows else "")
         else:
-            self.source_chips["AKiPS"].set("AKiPS", "neutral", "AKiPS not configured (optional)")
+            self.source_chips["AKiPS"].set("AKiPS", "neutral", "AKiPS not configured (optional)", "off")
         if cisco.configured():
             run = cisco.load_cache(self.cache_dir).get("last_run") or {}
             status = "bad" if run.get("errors") else ("good" if run else "warn")
             tip = ("Last Cisco run had errors: " + "; ".join(run.get("errors"))[:300] if run.get("errors") else
                    f"Last Cisco lookup {run.get('at')}" if run else "Configured; no lookups yet")
-            self.source_chips["Cisco"].set("Cisco", status, tip + ". Click for diagnostics.")
+            self.source_chips["Cisco"].set("Cisco", status, tip + ". Click for diagnostics.",
+                                           "errors" if run.get("errors") else "")
         else:
-            self.source_chips["Cisco"].set("Cisco", "neutral", "Cisco APIs not configured (optional)")
+            self.source_chips["Cisco"].set("Cisco", "neutral", "Cisco APIs not configured (optional)", "off")
 
     def _update_checklist(self):
         access, secret = client.saved_credentials()
@@ -693,21 +1034,26 @@ class MainWindow(QMainWindow):
             ("Optional: connect Cisco APIs for contracts and software suggestions", cisco.configured()),
         ]
         t = theme.tokens()
-        self.checklist.setText("<p>Pull your findings from Tenable to get started.</p>" + "".join(
-            f"<p style='margin:4px 0'><b style='color:{t['good'] if done else t['text_muted']}'>"
-            f"{'✓' if done else '○'}</b>&nbsp; {html.escape(label)}</p>" for label, done in steps))
+        self.checklist.setText("".join(
+            f"<p style='margin:6px 0'><span style='color:{t['dot_good'] if done else t['text_faint']}'>"
+            f"{'✓' if done else '○'}</span>&nbsp;&nbsp;<span style='color:{t['text'] if not done else t['text_muted']}'>"
+            f"{html.escape(label_)}</span></p>" for label_, done in steps))
+
+    def _update_counts(self):
+        f = self.findings
+        hosts = set(f["hostname"].dropna()) if not f.empty else set()
+        if not self.assets.empty:
+            hosts |= set(self.assets["hostname"].dropna())
+        if not self.inventory.empty:
+            hosts |= set(self.inventory["hostname"].dropna())
+        counts = {"findings": len(f), "devices": len(hosts), "remediation": len(self.actions),
+                  "hardware": len(self.inventory)}
+        for key, item in self.nav_items.items():
+            n = counts.get(key)
+            item.setData(COUNT_ROLE, f"{n:,}" if n else "")
 
     def _update_status(self, *_):
-        filters = self.meta.get("filters") or {}
-        sev = ", ".join(filters.get("severity") or []) or "all"
-        state = ", ".join(filters.get("state") or []) or "all"
-        since = f" · last {filters['since_days']} days" if filters.get("since_days") else ""
-        self.status_label.setText(
-            f"{len(self.findings):,} findings · "
-            f"{self.findings['hostname'].nunique() if not self.findings.empty else 0:,} devices · "
-            f"severity: {sev} · state: {state}{since}"
-            + (f" · {len(self.inventory):,} chassis inventoried" if not self.inventory.empty else "")
-        )
+        self._update_counts()
 
     def notify(self, text, ms=6000):
         if self.toast is not None:
@@ -741,19 +1087,22 @@ class MainWindow(QMainWindow):
     # ---- presentation + exports ----------------------------------------------------------
     def toggle_presentation(self):
         """Meeting mode: larger type, full screen, summary views only. F11 / Esc toggles back."""
-        self.presenting = not getattr(self, "presenting", False)
+        self.presenting = not self.presenting
         self.present_action.setChecked(self.presenting)
         theme.apply(QApplication.instance(), self.settings.value("theme", "system"), presentation=self.presenting)
         theme.refresh_fonts(self)
-        self.menuBar().setVisible(not self.presenting)
-        self.statusBar().setVisible(not self.presenting)
-        self.global_search.setVisible(not self.presenting)
-        self.pull_button.setVisible(not self.presenting)
+        for widget in (self.search_button, self.pull_button, self.page_subtitle):
+            widget.setVisible(not self.presenting)
         self.present_button.setText("Exit presentation" if self.presenting else "Present")
-        self.sidebar.setFixedWidth(round(SIDEBAR_WIDTH * (1.2 if self.presenting else 1)))
+        self.sidebar.setFixedWidth(round(SIDEBAR_WIDTH * (1.15 if self.presenting else 1)))
         for row in range(self.nav.count()):
-            key = self.nav.item(row).data(Qt.UserRole)
-            self.nav.item(row).setHidden(self.presenting and key not in PRESENT_VIEWS)
+            item = self.nav.item(row)
+            item.setHidden(self.presenting and item.data(Qt.UserRole) not in PRESENT_VIEWS)
+        self._fit_nav()
+        for b in (self.workspace_button, self.search_button, self.settings_button, self.fresh_chip,
+                  *self.source_chips.values()):
+            b.setFont(theme.font("body"))
+            b.updateGeometry()
         if self.presenting:
             self._was_maximized = self.isMaximized()
             if self.current_view() not in PRESENT_VIEWS:
@@ -765,7 +1114,7 @@ class MainWindow(QMainWindow):
             self.reload()  # re-fit tables and charts to the new type scale
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape and getattr(self, "presenting", False):
+        if event.key() == Qt.Key_Escape and self.presenting:
             self.toggle_presentation()
             return
         super().keyPressEvent(event)
@@ -802,31 +1151,16 @@ class MainWindow(QMainWindow):
                   "upgrade": int((c["sw_status"] == "Upgrade suggested").sum())}
         images = {}
 
-        def snapshot(view):
-            """Render a chart at print size with animation off (a mid-animation grab has empty bars)."""
-            from PySide6.QtCharts import QChart, QDateTimeAxis
+        from tenable_net.gui.charts import render_image
 
-            chart = view.chart()
-            chart.setAnimationOptions(QChart.NoAnimation)
-            for axis in chart.axes():
-                if isinstance(axis, QDateTimeAxis):
-                    axis.setTickCount(5)
-            old_size = view.size()
-            view.resize(480, 280)
-            QApplication.processEvents()
-            image = view.grab().toImage()
-            view.resize(old_size)
-            chart.setAnimationOptions(QChart.SeriesAnimations)
-            return image
-
-        images["severity"] = (snapshot(self.overview.sev_chart), "Findings by severity")
+        images["severity"] = (render_image(self.overview.sev_chart), "Findings by severity")
         if len(history.list_snapshots(self.cache_dir)) >= 2:
             tv = self.trends_view or self._ensure_view("trends")  # the real page, not a throwaway widget
-            images["trend"] = (snapshot(tv.open_chart), "Open findings over time")
+            images["trend"] = (render_image(tv.open_chart), "Open findings over time")
         return {"fleet": fleet, "kpis": kpis, "changes": ch, "actions": self.actions,
                 "devices": self.overview.device_risk, "hardware": hw, "images": images,
                 "pulled_at": str(self.meta.get("pulled_at", ""))[:16].replace("T", " "),
-                "driver": self.overview.driver.text()}
+                "driver": self.overview.driver_text("light")}
 
     def export_summary(self, path=None):
         from tenable_net.gui.executive_summary import render_pdf
@@ -850,10 +1184,16 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.toast is not None and self.toast.isVisible():
-            self.toast.show_message(self.toast.text())
+            self.toast.reposition()
+        palette = getattr(self, "command_palette", None)
+        if palette is not None and palette.isVisible():
+            palette.place()
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
+        if self._follows_theme:  # a closed window no longer follows theme changes
+            theme.signals.changed.disconnect(self._retheme)
+            self._follows_theme = False
         super().closeEvent(event)
 
 

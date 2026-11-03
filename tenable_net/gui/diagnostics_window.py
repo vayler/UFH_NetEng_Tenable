@@ -1,4 +1,4 @@
-"""Tools -> Enrichment diagnostics: where each device falls out of the AKiPS -> Cisco pipeline."""
+"""Enrichment diagnostics: where each device falls out of the AKiPS -> Cisco pipeline."""
 
 import html
 import re
@@ -7,16 +7,18 @@ import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter,
-    QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QStackedWidget, QTabBar, QTabWidget,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from tenable_net import akips, cisco, diagnostics, inventory
+from tenable_net.gui import icons, theme
 from tenable_net.gui.models import DataFrameModel, MaskFilterProxy
-from tenable_net.gui.widgets import fit_columns, make_table, start_worker
+from tenable_net.gui.widgets import (
+    SearchField, Splitter, button, detail_css, divider, fit_columns, label, make_table, start_worker,
+)
 
 DEVICE_COLUMNS = ["hostname", "stage", "reason", "vendor", "models", "with_serial", "akips_device"]
-STAGE_COLORS = {"OK": "#43a047", "Not Cisco": "#9e9e9e", "Not looked up yet": "#fb8c00"}
 DETAIL_FIELDS = [
     ("in_tenable", "In Tenable"), ("ip", "IP"), ("akips_device", "AKiPS device"), ("match_method", "Matched by"),
     ("sys_descr", "sysDescr"), ("akips_classes", "AKiPS entity classes"), ("chassis_rule", "Chassis found by"),
@@ -27,8 +29,45 @@ DETAIL_FIELDS = [
 ]
 
 
+class FunnelStrip(QFrame):
+    """Tenable devices → with inventory → with a model → with a serial → Cisco → fully enriched."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Panel")
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(18, 12, 18, 12)
+        self.row.setSpacing(14)
+
+    def set_steps(self, funnel):
+        while self.row.count():
+            item = self.row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        steps = list(funnel.items())
+        muted = theme.tokens()["text_faint"]
+        for i, (name, value) in enumerate(steps[:-1]):
+            if i:
+                arrow = QLabel()
+                arrow.setPixmap(icons.pixmap("chevron-right", muted, 14))
+                self.row.addWidget(arrow)
+            self.row.addLayout(self._block(name, value), 1)
+        self.row.addWidget(divider(vertical=True))
+        name, value = steps[-1]
+        self.row.addLayout(self._block(name, value), 1)
+
+    @staticmethod
+    def _block(name, value):
+        block = QVBoxLayout()
+        block.setSpacing(0)
+        block.addWidget(label(f"{value:,}", "headline", weight="medium"))
+        caption = label(name[:1].upper() + name[1:], "caption", "Muted", wrap=True)
+        block.addWidget(caption)
+        return block
+
+
 class DiagnosticsWindow(QWidget):
-    """Non-modal window; reload() recomputes the report from the cache."""
+    """Embedded in the main window (or a separate window); reload() recomputes the report from the cache."""
 
     def __init__(self, cache_dir, parent=None, embedded=False):
         super().__init__(parent, Qt.Widget if embedded else Qt.Window)
@@ -39,112 +78,153 @@ class DiagnosticsWindow(QWidget):
         self.devices = pd.DataFrame()
         self.worker = None
 
-        self.funnel = QLabel()
-        self.funnel.setTextFormat(Qt.RichText)
-        self.funnel.setWordWrap(True)
-        self.last_run = QLabel()
-        self.last_run.setWordWrap(True)
-        self.last_run.setStyleSheet("color: palette(placeholder-text);")
+        self.funnel = FunnelStrip()
+        self.last_run = label("", "caption", "Muted", wrap=True)
 
         self.stage_model = DataFrameModel()
         self.stage_view = make_table(self.stage_model, stretch_column="stage")
         self.stage_view.setSortingEnabled(False)
         self.stage_view.setToolTip("Click a stage to list its devices")
         self.stage_view.selectionModel().currentRowChanged.connect(self._filter)
-        self.search = QLineEdit(placeholderText="Filter devices…", clearButtonEnabled=True)
+        self.search = SearchField("Filter devices…")
         self.search.textChanged.connect(self._filter)
-        self.hint = QLabel()
-        self.hint.setWordWrap(True)
+        self.hint = label("", "body", wrap=True)
+        self.hint.setTextFormat(Qt.RichText)
+        self.hint.setContentsMargins(16, 10, 16, 12)
 
         self.device_model = DataFrameModel()
         self.device_proxy = MaskFilterProxy(self)
         self.device_proxy.setSourceModel(self.device_model)
-        self.device_view = make_table(self.device_proxy, stretch_column="reason")
+        self.device_view = make_table(self.device_proxy)
         self.device_view.selectionModel().currentRowChanged.connect(self._on_device)
-        self.count = QLabel()
+        self.count = label("", "caption", "Muted")
 
         self.detail = QTextBrowser()
+        self.detail.document().setDocumentMargin(14)
         self.raw = QPlainTextEdit(readOnly=True)
+        self.raw.setObjectName("Log")
+        self.raw.setFont(theme.mono_font())
         self.raw.setPlaceholderText("'Show raw AKiPS data' lists everything AKiPS holds for the selected device.")
         detail_tabs = QTabWidget()
+        detail_tabs.setDocumentMode(True)
         detail_tabs.addTab(self.detail, "Details")
         detail_tabs.addTab(self.raw, "Raw AKiPS data")
         self.detail_tabs = detail_tabs
 
-        self.raw_button = QPushButton("Show raw AKiPS data")
+        self.raw_button = button("Show raw AKiPS data", "ghost", "database")
         self.raw_button.clicked.connect(self.show_raw)
-        self.requery_button = QPushButton("Re-query Cisco for this device")
+        self.requery_button = button("Re-query Cisco for this device", "ghost", "reload")
         self.requery_button.clicked.connect(self.requery)
-        refresh = QPushButton("Refresh")
+        refresh = button("Refresh", "ghost", "reload")
         refresh.clicked.connect(self.reload)
-        export_csv = QPushButton("Export CSV…")
+        export_csv = button("Export CSV…", "ghost", "file")
         export_csv.clicked.connect(self.export_csv)
-        bundle = QPushButton("Export shareable report…")
-        bundle.setToolTip("Zip of the diagnostics with hostnames, IPs and serials replaced by tokens")
+        bundle = button("Shareable report…", "ghost", "export",
+                        "Zip of the diagnostics with hostnames, IPs and serials replaced by tokens")
         bundle.clicked.connect(self.export_bundle)
-        self.status = QLabel()
+        self.status = label("", "caption", "Muted")
 
         self.unmatched_model = DataFrameModel()
         self.unmatched_view = make_table(self.unmatched_model, stretch_column="sys_descr")
 
-        # layout
+        # layout: stages | devices + detail
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(QLabel("<b>Where devices stop</b> (first failing stage)"))
+        lv.setSpacing(0)
+        head = QHBoxLayout()
+        head.setContentsMargins(16, 12, 16, 8)
+        head.addWidget(label("Where devices stop", "section"))
+        head.addStretch(1)
+        lv.addLayout(head)
         lv.addWidget(self.stage_view, 1)
+        lv.addWidget(divider())
         lv.addWidget(self.hint)
 
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.addWidget(self.search)
-        rv.addWidget(self.device_view, 3)
-        rv.addWidget(self.count)
+        rv.setSpacing(0)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(12, 8, 12, 8)
+        bar.setSpacing(6)
+        bar.addWidget(self.search, 1)
+        bar.addWidget(self.count)
+        rv.addLayout(bar)
+        rv.addWidget(divider())
+        lower = QWidget()
+        low = QVBoxLayout(lower)
+        low.setContentsMargins(0, 0, 0, 0)
+        low.setSpacing(0)
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(10, 6, 10, 0)
         for b in (self.raw_button, self.requery_button):
             buttons.addWidget(b)
         buttons.addStretch(1)
-        rv.addLayout(buttons)
-        rv.addWidget(detail_tabs, 2)
+        low.addLayout(buttons)
+        low.addWidget(detail_tabs, 1)
+        inner = Splitter(Qt.Vertical, line=True)
+        inner.addWidget(self.device_view)
+        inner.addWidget(lower)
+        inner.setSizes([380, 300])
+        rv.addWidget(inner, 1)
 
-        split = QSplitter(Qt.Horizontal)
+        split = Splitter(Qt.Horizontal, line=True)
         split.addWidget(left)
         split.addWidget(right)
-        split.setSizes([380, 920])
+        split.setSizes([360, 840])
 
-        tabs = QTabWidget()
-        tabs.addTab(split, "Devices")
         unmatched_page = QWidget()
         uv = QVBoxLayout(unmatched_page)
-        note = QLabel("AKiPS devices that didn't match any Tenable device by IP, sysName or name. If one of "
-                      "them is a Tenable device under another name, add <code>akips_device,tenable_hostname</code> "
-                      f"to <code>{html.escape(str(inventory.aliases_path()))}</code> and click Refresh.")
-        note.setWordWrap(True)
+        uv.setContentsMargins(0, 0, 0, 0)
+        uv.setSpacing(0)
+        note = label("AKiPS devices that didn't match any Tenable device by IP, sysName or name. If one of them is a "
+                     "Tenable device under another name, add <code>akips_device,tenable_hostname</code> to "
+                     f"<code>{html.escape(str(inventory.aliases_path()))}</code> and click Refresh.", "body", "Muted",
+                     wrap=True)
+        note.setTextFormat(Qt.RichText)
+        note.setContentsMargins(16, 12, 16, 12)
         uv.addWidget(note)
-        uv.addWidget(self.unmatched_view)
-        tabs.addTab(unmatched_page, "Unmatched AKiPS devices")
-        self.tabs = tabs
+        uv.addWidget(divider())
+        uv.addWidget(self.unmatched_view, 1)
 
-        bottom = QHBoxLayout()
-        bottom.addWidget(self.status, 1)
+        self.tabs = QTabBar()
+        self.tabs.setDrawBase(False)
+        self.tabs.setExpanding(False)
+        self.tabs.addTab("Devices")
+        self.tabs.addTab("Unmatched AKiPS devices")
+        self.pages = QStackedWidget()
+        self.pages.addWidget(split)
+        self.pages.addWidget(unmatched_page)
+        self.tabs.currentChanged.connect(self.pages.setCurrentIndex)
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(14, 6, 10, 0)
+        toolbar.setSpacing(4)
+        toolbar.addWidget(self.tabs, 0, Qt.AlignBottom)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.status)
         for b in (refresh, export_csv, bundle):
-            bottom.addWidget(b)
+            toolbar.addWidget(b)
+
+        top = QVBoxLayout()
+        top.setContentsMargins(18, 14, 18, 4)
+        top.setSpacing(8)
+        top.addWidget(self.funnel)
+        top.addWidget(self.last_run)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.funnel)
-        layout.addWidget(self.last_run)
-        layout.addWidget(tabs, 1)
-        layout.addLayout(bottom)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(top)
+        layout.addLayout(toolbar)
+        layout.addWidget(divider())
+        layout.addWidget(self.pages, 1)
         self.reload()
 
     # ---- data ----------------------------------------------------------------
     def reload(self):
         funnel, self.devices, unmatched = diagnostics.enrichment_report(self.cache_dir)
-        steps = list(funnel.items())
-        self.funnel.setText(
-            "<b>Funnel:</b> " + " &nbsp;→&nbsp; ".join(f"{html.escape(k)} <b>{v:,}</b>" for k, v in steps[:-1])
-            + f" &nbsp;·&nbsp; {html.escape(steps[-1][0])}: <b>{steps[-1][1]:,}</b>")
+        self.funnel.set_steps(funnel)
         run = diagnostics.last_run(self.cache_dir)
         if run:
             parts = [f"{k}: {v.get('found', 0)}/{v.get('sent', 0)} found"
@@ -161,7 +241,8 @@ class DiagnosticsWindow(QWidget):
         fit_columns(self.stage_view)
         cols = [c for c in DEVICE_COLUMNS if c in self.devices]
         self.device_model.set_frame(self.devices, cols)
-        fit_columns(self.device_view, max_width=200, caps={"models": 140, "akips_device": 140, "stage": 170})
+        fit_columns(self.device_view, max_width=200, caps={"reason": 340, "models": 140, "akips_device": 140,
+                                                           "stage": 190})
         self.unmatched_model.set_frame(unmatched)
         fit_columns(self.unmatched_view, max_width=260)
         self.tabs.setTabText(1, f"Unmatched AKiPS devices ({len(unmatched)})")
@@ -184,15 +265,17 @@ class DiagnosticsWindow(QWidget):
         frame = self.device_model.frame
         if frame.empty:
             self.device_proxy.set_mask(np.zeros(0, dtype=bool))
-            self.count.setText("No devices.")
+            self.count.setText("No devices")
             return
         mask = np.ones(len(frame), dtype=bool)
         stage = self.current_stage()
         if stage:
             mask &= (frame["stage"] == stage).to_numpy()
-            self.hint.setText(f"<b>What to do:</b> {html.escape(diagnostics.HINTS.get(stage, ''))}")
+            self.hint.setText(f"<b>What to do</b><br><span style='color:{theme.tokens()['text_muted']}'>"
+                              f"{html.escape(diagnostics.HINTS.get(stage, ''))}</span>")
         else:
             self.hint.setText("")
+        self.hint.setVisible(bool(stage))
         text = self.search.text().strip().lower()
         if text:
             hay = frame[[c for c in ("hostname", "reason", "models", "serials", "akips_device", "ip") if c in frame]]
@@ -214,20 +297,23 @@ class DiagnosticsWindow(QWidget):
         row = self.selected()
         if row is None:
             return
-        color = STAGE_COLORS.get(row["stage"], "#e53935")
-        lines = [f"<h3 style='margin:0'>{html.escape(str(row['hostname']))}</h3>",
-                 f"<p><b style='color:{color}'>{html.escape(row['stage'])}</b>"
-                 f"{' — ' + html.escape(str(row['reason'])) if row['reason'] else ''}</p>"]
+        stage = str(row["stage"])
+        dot = theme.status_dot(stage) or theme.tokens()["dot_bad"]
+        lines = [f"<h2>{html.escape(str(row['hostname']))}</h2>",
+                 f"<p>{theme.dot_badge(dot, html.escape(stage))}"
+                 f"{' <span class=muted>— ' + html.escape(str(row['reason'])) + '</span>' if row['reason'] else ''}"
+                 "</p>"]
         if row.get("hint"):
-            lines.append(f"<p><i>{html.escape(row['hint'])}</i></p>")
+            lines.append(f"<p class='muted'>{html.escape(row['hint'])}</p>")
         cells = []
-        for key, label in DETAIL_FIELDS:
+        for key, field_label in DETAIL_FIELDS:
             value = row.get(key)
             if value is None or (isinstance(value, float) and pd.isna(value)) or value == "":
                 continue
             text = html.escape(str(value)).replace("; ", "<br>") if key == "member_detail" else html.escape(str(value))
-            cells.append(f"<tr><td style='color:gray; padding-right:12px; white-space:nowrap'>{label}</td><td>{text}</td></tr>")
-        lines.append(f"<table>{''.join(cells)}</table>")
+            cells.append(f"<tr><td class='k'>{field_label}</td><td>{text}</td></tr>")
+        lines.append(f"<table cellspacing='0' style='margin-top:6px'>{''.join(cells)}</table>")
+        self.detail.document().setDefaultStyleSheet(detail_css())
         self.detail.setHtml("".join(lines))
         self.raw_button.setEnabled(bool(row.get("akips_device")) and akips.configured())
         self.requery_button.setEnabled(row.get("vendor") == "Cisco" and cisco.configured())
@@ -308,3 +394,5 @@ class DiagnosticsWindow(QWidget):
                                     f"Saved {path}\n\nHostnames, IPs and serial numbers are replaced with tokens. "
                                     "Have a quick look before sharing it.")
 
+    def refresh_theme(self):
+        self.reload()

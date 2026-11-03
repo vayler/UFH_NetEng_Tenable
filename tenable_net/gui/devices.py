@@ -1,4 +1,4 @@
-"""Devices tab: searchable device list on the left, the selected device's hardware + findings on the right."""
+"""Devices: searchable device list on the left; the selected device's score, hardware and findings on the right."""
 
 import html
 from datetime import timedelta
@@ -6,21 +6,21 @@ from datetime import timedelta
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QTextBrowser, QVBoxLayout, QWidget
 
 from tenable_net import reports, risk
-from tenable_net.gui.findings import FindingsPanel
 from tenable_net.gui import theme
+from tenable_net.gui.findings import FindingsPanel
 from tenable_net.gui.models import DataFrameModel, MaskFilterProxy, display
-from tenable_net.gui.widgets import SEVERITY_COLORS, SEVERITY_TEXT, fit_columns, make_table
+from tenable_net.gui.widgets import SearchField, Splitter, divider, fit_columns, label, make_table
 from tenable_net.inventory import device_summary, has_lifecycle
 from tenable_net.normalize import vendor_of
 
-DEVICE_COLUMNS = ["hostname", "risk", "ip", "vendor", "critical", "high", "medium", "low"]
+DEVICE_COLUMNS = ["hostname", "risk", "critical", "high", "medium", "low", "ip", "vendor"]
 # Hardware mode has more columns, so only critical/high counts are listed (the header shows all four).
-HARDWARE_DEVICE_COLUMNS = ["hostname", "risk", "model", "contract", "sw_status", "lifecycle", "critical", "high"]
+HARDWARE_DEVICE_COLUMNS = ["hostname", "risk", "critical", "high", "contract", "sw_status", "model", "lifecycle"]
 DEVICE_FINDING_COLUMNS = [
-    "risk", "severity", "plugin_id", "plugin_name", "vpr", "cves", "exploit_available", "port", "days_open",
+    "risk", "severity", "plugin_name", "vpr", "exploit_available", "cves", "plugin_id", "port", "days_open",
     "last_found",
 ]
 LIFECYCLE_FILTERS = {
@@ -68,6 +68,26 @@ def device_frame(findings, assets, inventory=None):
     return devices.reset_index(drop=True)
 
 
+class DeviceHeader(QTextBrowser):
+    """The selected device's name, score breakdown and hardware, as selectable rich text."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(True)
+        self.document().setDocumentMargin(18)
+        self._html = ""
+
+    def setText(self, text):
+        from tenable_net.gui.widgets import detail_css
+
+        self._html = text
+        self.document().setDefaultStyleSheet(detail_css())
+        self.setHtml(text)
+
+    def text(self):
+        return self._html
+
+
 class DevicesTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,48 +96,56 @@ class DevicesTab(QWidget):
         self.inventory = pd.DataFrame()
         self.enrichment = {}
 
-        self.search = QLineEdit(placeholderText="Filter devices (name, IP, model, serial)…", clearButtonEnabled=True)
+        self.search = SearchField("Filter by name, IP, model, serial…")
         self.search.textChanged.connect(self._filter_devices)
         self.lifecycle_filter = QComboBox()
         self.lifecycle_filter.addItems(list(LIFECYCLE_FILTERS))
-        self.lifecycle_filter.setToolTip("Hardware lifecycle / contract filter (needs inventory data)")
+        self.lifecycle_filter.setToolTip("Hardware, contract and lifecycle filters (needs inventory data)")
         self.lifecycle_filter.currentIndexChanged.connect(self._filter_devices)
         self.devices_model = DataFrameModel()
         self.devices_proxy = MaskFilterProxy(self)
         self.devices_proxy.setSourceModel(self.devices_model)
         self.devices_view = make_table(self.devices_proxy, stretch_column="hostname")
         self.devices_view.selectionModel().currentRowChanged.connect(self._on_device)
-        self.device_count = QLabel()
+        self.device_count = label("", "caption", "Muted")
 
-        filters = QHBoxLayout()
+        bar = QFrame()
+        bar.setObjectName("Toolbar")
+        filters = QHBoxLayout(bar)
+        filters.setContentsMargins(12, 10, 8, 10)
+        filters.setSpacing(6)
         filters.addWidget(self.search, 3)
         filters.addWidget(self.lifecycle_filter, 2)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(14, 6, 14, 0)
+        footer.addWidget(self.device_count)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addLayout(filters)
+        left_layout.setSpacing(0)
+        left_layout.addWidget(bar)
+        left_layout.addWidget(divider())
         left_layout.addWidget(self.devices_view, 1)
-        left_layout.addWidget(self.device_count)
+        left_layout.addLayout(footer)
 
-        self.header = QLabel()
-        self.header.setTextFormat(Qt.RichText)
-        self.header.setWordWrap(True)
-        self.header.setOpenExternalLinks(True)
-        self.header.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.header = DeviceHeader()
         self.panel = FindingsPanel(DEVICE_FINDING_COLUMNS)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.header)
-        right_layout.addWidget(self.panel, 1)
+        right = Splitter(Qt.Vertical, line=True)
+        right.addWidget(self.header)
+        right.addWidget(self.panel)
+        right.setStretchFactor(0, 2)
+        right.setStretchFactor(1, 3)
+        right.setSizes([390, 460])  # a device has few findings; its score and hardware come first
+        self.right = right
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = Splitter(Qt.Horizontal, line=True)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([700, 740])
+        splitter.setSizes([560, 640])
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
     def set_data(self, findings, assets, inventory=None, enrichment=None):
@@ -149,7 +177,7 @@ class DevicesTab(QWidget):
         self.devices_view.sortByColumn(self.devices_model.column_index("risk"), Qt.DescendingOrder)
         self.devices_view._stretch_column = None if has_hw else "hostname"
         self.devices_view.horizontalHeader().setStretchLastSection(has_hw)
-        fit_columns(self.devices_view, max_width=200, caps={"model": 150})
+        fit_columns(self.devices_view, max_width=200, caps={"model": 150, "hostname": 210})
         self._filter_devices()
 
     def _filter_devices(self):
@@ -170,7 +198,12 @@ class DevicesTab(QWidget):
             if rule is not None:
                 mask &= rule(frame).fillna(False).to_numpy(dtype=bool)
         self.devices_proxy.set_mask(mask)
-        self.device_count.setText(f"{int(mask.sum()):,} of {len(frame):,} devices")
+        shown, total = int(mask.sum()), len(frame)
+        self.device_count.setText(f"{shown:,} devices" if shown == total else f"{shown:,} of {total:,} devices")
+        active = self.lifecycle_filter.currentIndex() > 0
+        if bool(self.lifecycle_filter.property("active")) != active:
+            self.lifecycle_filter.setProperty("active", active)
+            theme.repolish(self.lifecycle_filter)
         if self.devices_proxy.rowCount() and not self.devices_view.currentIndex().isValid():
             self.devices_view.selectRow(0)
 
@@ -195,47 +228,43 @@ class DevicesTab(QWidget):
         self.header.setText(self._header_html(device, len(rows)))
 
     def _header_html(self, device, n_findings):
-        badges = "&nbsp; ".join(theme.severity_badge(s, f"{int(device.get(s) or 0)} {s}")
-                                for s in ("critical", "high", "medium", "low"))
-        bits = []
-        if not device.get("in_tenable", True):
-            bits.append("<b style='color:#c62828'>Not in Tenable (AKiPS only)</b>")
+        t = theme.tokens()
+        counts = " &nbsp; ".join(theme.severity_badge(s, f"{int(device.get(s) or 0)} {s}")
+                                 for s in ("critical", "high", "medium", "low"))
+        bits = [html.escape(str(device.get("ip") or "")), html.escape(str(device.get("os") or "Unknown OS"))]
         if not self.assets.empty:
             match = self.assets[self.assets["hostname"] == device["hostname"]]
             if not match.empty:
                 a = match.iloc[0]
                 if a.get("system_type"):
-                    bits.append(f"Type: {html.escape(str(a['system_type']))}")
+                    bits.append(html.escape(str(a["system_type"])))
                 if display("last_seen", a.get("last_seen")):
-                    bits.append(f"Last seen: {display('last_seen', a.get('last_seen'))}")
+                    bits.append(f"last seen {display('last_seen', a.get('last_seen'))}")
                 if a.get("tags"):
-                    bits.append(f"Tags: {html.escape(str(a['tags']))}")
-        extra = "<br><span style='color:gray'>" + " · ".join(bits) + "</span>" if bits else ""
+                    bits.append(html.escape(str(a["tags"])))
+        warning = ""
+        if not device.get("in_tenable", True):
+            warning = (f"<p><span style='color:{t['bad']}; font-weight:600'>Not in Tenable (AKiPS only)</span>"
+                       f" <span class='muted'>— Tenable has never scanned this device.</span></p>")
         return (
-            f"<h2 style='margin:0'>{html.escape(str(device['hostname']))}</h2>"
-            f"<span style='color:gray'>{html.escape(str(device.get('ip') or ''))} · "
-            f"{html.escape(str(device.get('os') or 'Unknown OS'))}</span>{extra}"
+            f"<h2>{html.escape(str(device['hostname']))}</h2>"
+            f"<p class='muted'>{' · '.join(b for b in bits if b)}</p>{warning}"
+            f"<p style='margin-top:10px'>{counts} &nbsp;<span class='muted'>· {n_findings} findings</span></p>"
             f"{self._risk_html(device)}"
             f"{self._hardware_html(device['hostname'])}"
-            f"<p>{badges} &nbsp; <b>{n_findings}</b> findings</p>"
         )
 
     def _risk_html(self, device):
         """Risk score with the parts that add up to it ("why this score")."""
         if "risk" not in self.findings:
             return ""
-        parts, detail = risk.explain_device(device["hostname"], self.findings, self.hw_by_host.get(device["hostname"]))
+        # (the top finding's own breakdown is in the findings table and detail pane just below)
+        parts, _detail = risk.explain_device(device["hostname"], self.findings, self.hw_by_host.get(device["hostname"]))
         score = float(device.get("risk") or 0)
         band_name = risk.band(score)
-        muted = theme.tokens()["text_muted"]
         items = "".join(
-            f"<tr><td style='padding-right:14px'>{html.escape(label)}</td>"
-            f"<td align='right'>{'+' if points >= 0 else ''}{points:g}</td></tr>" for label, points in parts)
-        top = ""
-        if detail:
-            name, factors = detail[0]
-            top = (f"<div style='color:{muted}'>Top finding: {html.escape(name)} = "
-                   + " + ".join(f"{html.escape(lbl)} ({pts:g})" for lbl, pts in factors) + "</div>")
+            f"<tr><td class='k'>{html.escape(label_)}</td>"
+            f"<td align='right'>{'+' if points >= 0 else ''}{points:g}</td></tr>" for label_, points in parts)
         trend = ""
         if getattr(self, "history_dir", None) is not None:
             from tenable_net import history
@@ -244,11 +273,11 @@ class DevicesTab(QWidget):
             if len(points) >= 2:
                 first, last = points[0][1], points[-1][1]
                 arrow = "▲" if last > first else ("▼" if last < first else "→")
-                trend = (f"<span style='color:{muted}'>&nbsp; trend over {len(points)} pulls: "
+                trend = (f" &nbsp;<span class='muted'>· over {len(points)} pulls: "
                          f"{first:.0f} {arrow} {last:.0f}</span>")
-        return (f"<p style='margin:8px 0 2px 0'>{theme.band_badge(band_name, f'Risk {score:.0f} · {band_name}')}"
-                f"{trend}&nbsp; <span style='color:{muted}'>· why this score:</span></p>"
-                f"<table style='color:{muted}'>{items}</table>{top}")
+        return (f"<h4>Why this score</h4>"
+                f"<p>{theme.band_badge(band_name, f'Risk {score:.0f} · {band_name}')}{trend}</p>"
+                f"<table cellspacing='0'>{items}</table>")
 
     def _hardware_html(self, hostname):
         if self.inventory.empty:
@@ -256,58 +285,68 @@ class DevicesTab(QWidget):
         stage, reason = self.enrichment.get(hostname, ("OK", ""))
         note = ""
         if stage not in ("OK", "Not Cisco"):
-            note = (f"<p style='color:#fb8c00'>Enrichment: <b>{html.escape(stage)}</b>"
+            t = theme.tokens()
+            note = (f"<p><span style='color:{t['warn']}'>Enrichment: <b>{html.escape(stage)}</b></span>"
                     f"{' — ' + html.escape(reason) if reason else ''} "
-                    "<span style='color:gray'>(Tools → Enrichment diagnostics)</span></p>")
-        return note + self._hardware_table(hostname)
+                    "<span class='muted'>(see Diagnostics)</span></p>")
+        return "<h4>Hardware</h4>" + note + self._hardware_table(hostname)
 
     def _hardware_table(self, hostname):
         hw = self.inventory[self.inventory["hostname"] == hostname]
         if hw.empty:
-            return "<p style='color:gray'>No hardware inventory for this device.</p>"
+            return "<p class='muted'>No hardware inventory for this device.</p>"
 
         def text(value):  # pandas gives NaN/None for missing values; render those as empty
             return value.strip() if isinstance(value, str) else ""
 
-        def colored(value):
+        def status(value):
             value = text(value)
-            color = theme.status_color(value)
-            return f"<b style='color:{color}'>{html.escape(value)}</b>" if color else html.escape(value or "—")
+            return theme.status_badge(html.escape(value)) if value else "—"
 
-        cells = "padding:1px 10px 1px 0; white-space:nowrap"
+        cell = "padding:4px 16px 4px 0"
+        keep = cell + "; white-space:nowrap"  # model / serial never break mid-token
         show_eox = has_lifecycle(hw)
+
+        def two_lines(badge, detail):
+            return badge + (f"<br><span class='muted'>{detail}</span>" if detail else "")
+
+        def software(r):
+            running, suggested = html.escape(text(r["sw_version"])), html.escape(text(r["recommended_sw"]))
+            detail = f"{running} → {suggested}" if running and suggested else running or suggested
+            return two_lines(status(r["sw_status"]), detail)
+
+        def contract(r):
+            parts = [f"until {display('contract_end', r['contract_end'])}" if display("contract_end", r["contract_end"])
+                     else "", f"#{html.escape(text(r.get('contract_number')))}" if text(r.get("contract_number")) else ""]
+            return two_lines(status(r["contract"]), " · ".join(p for p in parts if p))
+
         columns = [
-            ("#", lambda r: html.escape(display("member", r["member"]))),
-            ("Model", lambda r: html.escape(text(r["model"]) or "—")),
-            ("Serial", lambda r: html.escape(text(r["serial"]) or "—")),
-            ("Running", lambda r: html.escape(text(r["sw_version"]))),
-            ("Cisco suggested", lambda r: html.escape(text(r["recommended_sw"]))),
-            ("Software", lambda r: colored(r["sw_status"])),
-            ("Contract", lambda r: colored(r["contract"])),
-            ("Ends", lambda r: display("contract_end", r["contract_end"])),
-            ("Contract #", lambda r: html.escape(text(r.get("contract_number")))),
+            ("#", keep, lambda r: html.escape(display("member", r["member"]))),
+            ("Model", keep, lambda r: html.escape(text(r["model"]) or "—")),
+            ("Serial", keep, lambda r: html.escape(text(r["serial"]) or "—")),
+            ("Software (running → Cisco suggested)", cell, software),
+            ("Contract", cell, contract),
         ]
         if show_eox:
-            columns += [("Lifecycle", lambda r: colored(r["lifecycle"])),
-                        ("LDoS", lambda r: display("ldos", r["ldos"]))]
-        columns.append(("Source", lambda r: html.escape(text(r["source"]))))
-        head = "".join(f"<th align='left' style='{cells}'>{name}</th>" for name, _fn in columns)
-        body = ["<tr>" + "".join(f"<td style='{cells}'>{fn(r)}</td>" for _name, fn in columns) + "</tr>"
+            columns.append(("Lifecycle", cell, lambda r: two_lines(
+                status(r["lifecycle"]), f"LDoS {display('ldos', r['ldos'])}" if display("ldos", r["ldos"]) else "")))
+        muted = theme.tokens()["text_muted"]
+        head = "".join(f"<td style='{style}; color:{muted}'>{name}</td>" for name, style, _fn in columns)
+        body = ["<tr>" + "".join(f"<td style='{style}'>{fn(r)}</td>" for _name, style, fn in columns) + "</tr>"
                 for _, r in hw.iterrows()]
-        extra = []
+        links = []
         service = next((text(v) for v in hw["service_level"] if text(v)), "")
         if service:
-            extra.append(f"Service level: {html.escape(service)}")
+            links.append(f"Service level: {html.escape(service)}")
         line_end = next((display("product_line_end", v) for v in hw["product_line_end"]
                          if display("product_line_end", v)), "")
         if line_end:
-            extra.append(f"Covered product line ends: {line_end}")
-        links = extra
+            links.append(f"Covered product line ends: {line_end}")
         bulletins = [text(u) for u in hw["bulletin_url"] if text(u)]
         migrations = [text(m) for m in hw["migration_pid"] if text(m)]
         if bulletins:
             links.append(f"<a href='{html.escape(bulletins[0])}'>EoL bulletin</a>")
         if migrations:
             links.append(f"Suggested replacement: <b>{html.escape(migrations[0])}</b>")
-        return (f"<table style='margin-top:6px'><tr>{head}</tr>{''.join(body)}</table>"
-                + (f"<p>{' · '.join(links)}</p>" if links else ""))
+        return (f"<table cellspacing='0'><tr>{head}</tr>{''.join(body)}</table>"
+                + (f"<p class='muted' style='margin-top:6px'>{' · '.join(links)}</p>" if links else ""))
