@@ -298,3 +298,105 @@ def test_every_view_paints_without_errors(window, monkeypatch):
     window.notify("Saved")
     window.grab()
     assert errors == []
+
+
+# ---- regressions from review ---------------------------------------------------------------------
+
+def test_splitter_children_survive_garbage_collection(app):
+    """A Python QSplitterHandle (returned through createHandle) let PySide free the widgets inside a splitter
+    held only by a local variable once the garbage collector ran: blank Devices / Remediation views on
+    PySide 6.6-6.8, dead search-field actions on 6.12."""
+    import gc
+
+    import shiboken6
+    from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
+
+    from tenable_net.gui.models import DataFrameModel
+    from tenable_net.gui.widgets import SearchField, Splitter, make_table
+
+    class Holder(QWidget):
+        def __init__(self):
+            super().__init__()
+            left = QWidget()
+            column = QVBoxLayout(left)
+            self.search = SearchField("Filter")
+            self.table = make_table(DataFrameModel())
+            column.addWidget(self.search)
+            column.addWidget(self.table)
+            split = Splitter(Qt.Horizontal)  # only a local reference, as in the views
+            split.addWidget(left)
+            split.addWidget(QWidget())
+            QVBoxLayout(self).addWidget(split)
+
+    stack = QStackedWidget()
+    holder = Holder()
+    stack.addWidget(holder)
+    stack.show()
+    QApplication.processEvents()
+    gc.collect()
+    QApplication.processEvents()
+    assert shiboken6.isValid(holder.table) and shiboken6.isValid(holder.search)
+    assert shiboken6.isValid(holder.search._icon_action)
+    holder.search.retheme()  # what every theme switch does
+    stack.close()
+
+
+def test_rich_text_follows_theme_switch(window):
+    tab = window.navigate("findings")
+    detail_before = tab.panel.detail.toHtml()
+    try:
+        window.set_theme("dark")
+        assert theme.TOKENS["dark"]["text"].lower() in tab.count_label.text().lower()
+        assert tab.panel.detail.toHtml() != detail_before  # re-rendered with dark colours
+        window.navigate("remediation")
+        assert theme.TOKENS["dark"]["text"].lower() in window.remediation_view.summary.text().lower()
+    finally:
+        window.set_theme("system")
+
+
+def test_overview_tables_show_every_row(window):
+    for view in (window.overview.devices_view, window.overview.plugins_view, window.overview.actions_view):
+        model = view.model()
+        assert model.rowCount() > 0
+        last = view.visualRect(model.index(model.rowCount() - 1, 0))
+        assert last.bottom() <= view.viewport().height(), view
+
+
+def test_overview_all_links_clear_filters(window):
+    window.overview.severity_activated.emit("critical")
+    assert window.findings_tab.panel.proxy.rowCount() == 3
+    window.overview.view_requested.emit("findings", {"text": ""})  # "All findings"
+    assert window.findings_tab.panel.proxy.rowCount() == 8
+    window.devices_tab.search.setText("core")
+    window.overview.view_requested.emit("devices", {"reset": True})  # "All devices"
+    assert window.devices_tab.search.text() == "" and window.devices_tab.devices_proxy.rowCount() == 5
+
+
+def test_presentation_can_be_left_when_data_disappears(window, tmp_path):
+    window.toggle_presentation()
+    try:
+        window.cache_dir = tmp_path / "gone"
+        window.reload()
+        assert window.present_button.isEnabled() and window.present_action.isEnabled()
+    finally:
+        window.toggle_presentation()
+    assert not window.presenting
+
+
+def test_find_falls_back_to_findings_when_the_view_has_no_visible_search(window):
+    window.navigate("hardware")  # no inventory in this fixture: its search is on a hidden page
+    window.focus_search()
+    assert window.current_view() == "findings"
+
+
+def test_palette_in_presentation_offers_only_presentation_views(window):
+    window.toggle_presentation()
+    try:
+        window.open_palette()
+        window.command_palette.input.setText("core")
+        rows = window.command_palette.model.rows
+        assert not any(r.group == "Devices" for r in rows)
+        assert not any(r.title.startswith("Search findings") for r in rows)
+        window.command_palette.close_palette()
+    finally:
+        window.toggle_presentation()

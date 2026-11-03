@@ -83,6 +83,8 @@ def compact_table(model, stretch_column, rows=TOP_ROWS):
     view.setSortingEnabled(False)
     view.setSelectionMode(QAbstractItemView.NoSelection)
     view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    # no horizontal scrollbar either: it would cover the last row; the stretch column absorbs the width
+    view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     view.viewport().setCursor(Qt.PointingHandCursor)
     view._rows = rows
     _fit_height(view)
@@ -90,8 +92,11 @@ def compact_table(model, stretch_column, rows=TOP_ROWS):
 
 
 def _fit_height(view, n=None):
+    """Exactly n rows plus the header. Call after the model has columns: an empty header reports no height."""
     n = view._rows if n is None else n
-    view.setFixedHeight(view.horizontalHeader().sizeHint().height() + n * theme.row_height() + 2)
+    header = view.horizontalHeader()
+    header_height = max(header.sizeHint().height(), header.minimumHeight())
+    view.setFixedHeight(header_height + n * theme.row_height() + 2 * view.frameWidth() + 1)
 
 
 class OverviewTab(QWidget):
@@ -161,7 +166,7 @@ class OverviewTab(QWidget):
         self.cards["critical"].clicked.connect(lambda: self.severity_activated.emit("critical"))
         self.cards["high"].clicked.connect(lambda: self.severity_activated.emit("high"))
         self.cards["exploitable"].clicked.connect(lambda: self.view_requested.emit("findings", {"exploitable": True}))
-        self.cards["at_risk"].clicked.connect(lambda: self.view_requested.emit("devices", {}))
+        self.cards["at_risk"].clicked.connect(lambda: self.view_requested.emit("devices", {"reset": True}))
         self.cards["uncovered"].clicked.connect(
             lambda: self.view_requested.emit("hardware", {"filter": "Not under contract"}))
         self.cards["upgrade"].clicked.connect(
@@ -220,7 +225,7 @@ class OverviewTab(QWidget):
         actions_panel = Panel("Top actions", self.actions_view, "Fixes that remove the most risk for the least work",
                               flush=True)
         actions_panel.add_action(button("Open plan", "link")).clicked.connect(
-            lambda: self.view_requested.emit("remediation", {}))
+            lambda: self.view_requested.emit("remediation", {"reset": True}))
         self.grid.addWidget(actions_panel)
 
         # 5. highest-risk devices / vulnerabilities
@@ -232,11 +237,11 @@ class OverviewTab(QWidget):
         self.plugins_view.clicked.connect(self._plugin_clicked)
         devices_panel = Panel("Highest-risk devices", self.devices_view, flush=True)
         devices_panel.add_action(button("All devices", "link")).clicked.connect(
-            lambda: self.view_requested.emit("devices", {}))
+            lambda: self.view_requested.emit("devices", {"reset": True}))
         plugins_panel = Panel("Highest-risk vulnerabilities", self.plugins_view, "Severe and widespread first",
                               flush=True)
         plugins_panel.add_action(button("All findings", "link")).clicked.connect(
-            lambda: self.view_requested.emit("findings", {}))
+            lambda: self.view_requested.emit("findings", {"text": ""}))  # an empty query clears the filters
         tables = QGridLayout()
         tables.setSpacing(14)
         tables.addWidget(devices_panel, 0, 0)
@@ -305,6 +310,9 @@ class OverviewTab(QWidget):
         plugins = self._top_plugins(scored)
         self.plugins_model.set_frame(plugins, ["risk", "severity", "devices", "plugin_name"])
         fit_columns(self.plugins_view, max_width=230)
+        rows = max(len(top_devices), len(plugins), 1)  # the two panels sit side by side: same height
+        _fit_height(self.devices_view, rows)
+        _fit_height(self.plugins_view, rows)
 
         self._severity_chart(scored)
         self._vendor_chart(scored)
@@ -384,13 +392,15 @@ class OverviewTab(QWidget):
             for key, frame in (("new", new), ("fixed", fixed), ("reopened", reopened)):
                 value, _cap = self.change_stats[key]
                 value.setText(f"{len(frame):,}")
-            crit_new = int((pd.concat([new, reopened])["severity"].isin(["critical", "high"])).sum())
+            parts = [frame for frame in (reopened, new) if not frame.empty]  # (pandas 2 warns on empty parts)
+            changed = pd.concat(parts) if parts else new
+            crit_new = int(changed["severity"].isin(["critical", "high"]).sum())
             if len(new) + len(reopened):
                 self.changes_note.setText(f"{crit_new} of the new and reopened findings are critical or high.")
             else:
                 self.changes_note.setText("Nothing new or reopened since the last pull.")
             self.changes_link.setVisible(bool(len(new) + len(reopened)))
-            top_new = pd.concat([reopened, new]).sort_values("risk", ascending=False).head(5)
+            top_new = changed.sort_values("risk", ascending=False).head(5)
             top_new = top_new.assign(change=["Reopened" if k in set(reopened["key"]) else "New" for k in top_new["key"]])
             self.new_model.set_frame(top_new, ["risk", "change", "severity", "hostname", "plugin_name"])
             fit_columns(self.new_view, max_width=200)

@@ -10,7 +10,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMenu, QPushButton, QSizePolicy, QSplitter, QSplitterHandle, QStackedWidget, QStyle, QStyledItemDelegate,
+    QMenu, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableView, QTextBrowser, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -509,43 +509,17 @@ class SearchField(QLineEdit):
         self._icon_action.setIcon(icons.icon("search", theme.tokens()["text_faint"], 15))
 
 
-class _SplitterHandle(QSplitterHandle):
-    def __init__(self, orientation, parent):
-        super().__init__(orientation, parent)
-        self.setAttribute(Qt.WA_Hover)
-
-    def enterEvent(self, event):
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, _event):
-        if not self.splitter().property("line"):
-            return
-        p = QPainter(self)
-        t = theme.tokens()
-        color = QColor(t["focus"] if self.underMouse() else t["border"])
-        if self.orientation() == Qt.Horizontal:
-            p.fillRect(QRectF(self.width() // 2, 0, 1, self.height()), color)
-        else:
-            p.fillRect(QRectF(0, self.height() // 2, self.width(), 1), color)
-        p.end()
-
-
 class Splitter(QSplitter):
-    """Splitter with a wide grab area that draws only a hairline (line=True) or nothing."""
+    """A splitter drawn as a hairline. Qt paints a 1 px handle but keeps a 5 px grab area around it ("tiny
+    mode"); the stylesheet colours it. Deliberately no Python QSplitterHandle subclass: a handle created in
+    Python and handed to Qt through createHandle() lets PySide free the splitter's widgets when the garbage
+    collector runs."""
 
     def __init__(self, orientation, line=True, parent=None):
         super().__init__(orientation, parent)
-        self.setProperty("line", line)
-        self.setHandleWidth(9)
+        self.setProperty("line", bool(line))
+        self.setHandleWidth(1 if line else 6)
         self.setChildrenCollapsible(False)
-
-    def createHandle(self):
-        return _SplitterHandle(self.orientation(), self)
 
 
 class Kbd(QLabel):

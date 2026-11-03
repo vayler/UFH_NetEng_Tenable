@@ -30,7 +30,8 @@ DETAIL_FIELDS = [
 
 
 class FunnelStrip(QFrame):
-    """Tenable devices → with inventory → with a model → with a serial → Cisco → fully enriched."""
+    """Tenable devices → with inventory → with a model → with a serial → Cisco → fully enriched, then the
+    AKiPS devices that matched nothing. The step widgets are built once; reloads only update their text."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,32 +39,44 @@ class FunnelStrip(QFrame):
         self.row = QHBoxLayout(self)
         self.row.setContentsMargins(18, 12, 18, 12)
         self.row.setSpacing(14)
+        self.keys, self.values, self.captions, self.arrows = [], [], [], []
 
     def set_steps(self, funnel):
-        while self.row.count():
-            item = self.row.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
         steps = list(funnel.items())
+        if [name for name, _value in steps] != self.keys:
+            self._build([name for name, _value in steps])
+        for (name, value), value_label in zip(steps, self.values):
+            value_label.setText(f"{value:,}")
         muted = theme.tokens()["text_faint"]
-        for i, (name, value) in enumerate(steps[:-1]):
-            if i:
-                arrow = QLabel()
-                arrow.setPixmap(icons.pixmap("chevron-right", muted, 14))
-                self.row.addWidget(arrow)
-            self.row.addLayout(self._block(name, value), 1)
-        self.row.addWidget(divider(vertical=True))
-        name, value = steps[-1]
-        self.row.addLayout(self._block(name, value), 1)
+        for arrow in self.arrows:
+            arrow.setPixmap(icons.pixmap("chevron-right", muted, 14))
 
-    @staticmethod
-    def _block(name, value):
-        block = QVBoxLayout()
-        block.setSpacing(0)
-        block.addWidget(label(f"{value:,}", "headline", weight="medium"))
-        caption = label(name[:1].upper() + name[1:], "caption", "Muted", wrap=True)
-        block.addWidget(caption)
-        return block
+    def _build(self, keys):
+        while self.row.count():  # only when the steps themselves change (normally just the first time)
+            item = self.row.takeAt(0)
+            for widget in ([item.widget()] if item.widget() else
+                           [item.layout().itemAt(i).widget() for i in range(item.layout().count())]
+                           if item.layout() else []):
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
+        self.keys, self.values, self.captions, self.arrows = list(keys), [], [], []
+        for i, name in enumerate(keys):
+            if i == len(keys) - 1:
+                self.row.addWidget(divider(vertical=True))
+            elif i:
+                arrow = QLabel()
+                self.arrows.append(arrow)
+                self.row.addWidget(arrow)
+            block = QVBoxLayout()
+            block.setSpacing(0)
+            value = label("", "headline", weight="medium")
+            caption = label(name[:1].upper() + name[1:], "caption", "Muted", wrap=True)
+            block.addWidget(value)
+            block.addWidget(caption)
+            self.values.append(value)
+            self.captions.append(caption)
+            self.row.addLayout(block, 1)
 
 
 class DiagnosticsWindow(QWidget):

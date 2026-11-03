@@ -218,6 +218,19 @@ class DevicesTab(QWidget):
                 return True
         return False
 
+    def refresh_theme(self):
+        """Re-render the selected device and finding (their colours are baked into the rich text), keeping
+        the finding that is selected."""
+        current = self.devices_view.currentIndex()
+        if current.isValid():
+            device = self.devices_model.frame.iloc[self.devices_proxy.mapToSource(current).row()]
+            self.header.setText(self._header_html(device, self.panel.model.rowCount()))
+        self.panel.refresh_theme()
+
+    def reset_filters(self):
+        self.search.clear()
+        self.lifecycle_filter.setCurrentIndex(0)
+
     def _on_device(self, current, _previous):
         if not current.isValid():
             return

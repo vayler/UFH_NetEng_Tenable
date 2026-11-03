@@ -11,9 +11,12 @@ REPORT_SEVERITIES = SEVERITY_ORDER
 
 
 def _severity_counts(df, by):
+    # Count (keys, severity) pairs that occur. SeriesGroupBy.value_counts() on the categorical severity
+    # column ignores observed=True on pandas 2.x and returns every combination of the key values (e.g. each
+    # hostname with every IP and OS), which showed up as phantom all-zero devices.
     counts = (
-        df.groupby(by, observed=True)["severity"]
-        .value_counts()
+        df.groupby([*by, "severity"], observed=True)
+        .size()
         .unstack(fill_value=0)
         .reindex(columns=REPORT_SEVERITIES, fill_value=0)
     )

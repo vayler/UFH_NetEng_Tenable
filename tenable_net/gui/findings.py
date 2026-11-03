@@ -83,6 +83,14 @@ class FindingsPanel(Splitter):
         row = self.proxy.mapToSource(current).row()
         self.detail.show_finding(self.model.frame.iloc[row])
 
+    def refresh_theme(self):
+        """Re-render the detail pane: its colours are baked into the rich text."""
+        current = self.table.currentIndex()
+        if current.isValid() and current.row() < self.proxy.rowCount():
+            self._on_row(current, None)
+        else:
+            self.detail.clear_detail()
+
 
 def _check_row(checkbox, count_label):
     row = QWidget()
@@ -108,6 +116,7 @@ class FindingsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.df = pd.DataFrame()
+        self._counts = (0, 0, 0)
         self._debounce = QTimer(self, singleShot=True, interval=200)
         self._debounce.timeout.connect(self.apply_filters)
 
@@ -240,12 +249,22 @@ class FindingsTab(QWidget):
         self.panel.set_mask(mask)
         shown, total = int(mask.sum()), len(mask)
         devices = self.panel.model.frame.loc[mask, "hostname"].nunique() if total else 0
+        self._counts = (shown, total, devices)
+        self._render_count()
+        self._update_chips(filters)
+        self.count_changed.emit(shown, total)
+
+    def _render_count(self):
+        shown, total, devices = self._counts
         t = theme.tokens()
         lead = f"{shown:,}" if shown == total else f"{shown:,} of {total:,}"
         self.count_label.setText(f"<span style='color:{t['text']}'>{lead}</span> findings · "
                                  f"<span style='color:{t['text']}'>{devices:,}</span> devices")
-        self._update_chips(filters)
-        self.count_changed.emit(shown, total)
+
+    def refresh_theme(self):
+        if not self.df.empty:
+            self._render_count()
+            self.panel.refresh_theme()
 
     def reset_filters(self):
         widgets = (*self.sev_checks.values(), *self.state_checks.values(), self.exploitable, self.changed,

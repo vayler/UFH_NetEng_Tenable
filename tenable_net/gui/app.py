@@ -732,8 +732,9 @@ class MainWindow(QMainWindow):
         self.views[key] = widget
 
     def navigate(self, view, **filters):
-        """Show a view, optionally filtered: findings(text=, severity=), devices(hostname=),
-        diagnostics(stage=)."""
+        """Show a view, optionally filtered: findings(text=, severity=, exploitable=, changed=; text="" just
+        clears the filters), devices(hostname= | lifecycle= | reset=True), hardware(filter=),
+        remediation(action= | reset=True), diagnostics(stage=)."""
         page = self.show_view(view)
         if view == "findings" and (filters.get("text") is not None or filters.get("severity")
                                    or filters.get("exploitable") or filters.get("changed")):
@@ -744,6 +745,8 @@ class MainWindow(QMainWindow):
         elif view == "devices" and filters.get("lifecycle"):
             page.search.clear()
             page.lifecycle_filter.setCurrentText(filters["lifecycle"])
+        elif view in ("devices", "remediation") and filters.get("reset"):
+            page.reset_filters()
         elif view == "hardware" and filters.get("filter"):
             page.select_filter(filters["filter"])
         elif view == "remediation" and filters.get("action"):
@@ -769,8 +772,8 @@ class MainWindow(QMainWindow):
         """Ctrl+F: the current view's own search box (Findings when the view has none)."""
         page = self.pages.currentWidget()
         search = getattr(page, "search", None)
-        if search is None or self.current_view() in ("overview", "trends"):
-            self.navigate("findings")
+        if search is None or not search.isVisibleTo(self) or self.current_view() in ("overview", "trends"):
+            self.navigate("findings")  # e.g. Hardware before any inventory, where its search is hidden
             search = self.findings_tab.search
         search.setFocus()
         search.selectAll()
@@ -851,10 +854,12 @@ class MainWindow(QMainWindow):
                                      "arrow-right", keys=shortcut_keys(action.shortcut()), run=action.trigger))
         for name, act in self.theme_actions.items():
             entries.append(Entry(f"Theme: {name.title()}", "Commands", act.property("icon_name"), run=act.trigger))
+        if self.presenting:  # devices, CVEs, plugins… open views that presentation mode hides
+            return entries
         return entries + self._target_entries()
 
     def open_palette(self):
-        self.command_palette.open(self.palette_entries())
+        self.command_palette.open(self.palette_entries(), search_findings=not self.presenting)
 
     # ---- theme ---------------------------------------------------------------------
     def set_theme(self, mode_name):
@@ -907,9 +912,10 @@ class MainWindow(QMainWindow):
             self.notify("Data updated from the cache folder.")
 
     def _set_data_actions(self, enabled):
-        for widget in (self.report_action, self.summary_action, self.image_action, self.report_button,
-                       self.present_button, self.present_action):
+        for widget in (self.report_action, self.summary_action, self.image_action, self.report_button):
             widget.setEnabled(enabled)
+        # presentation mode must stay possible to leave, even if the data disappears while presenting
+        self.present_button.setEnabled(enabled or self.presenting)
 
     def reload(self):
         self._rewatch()

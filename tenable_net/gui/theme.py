@@ -498,6 +498,9 @@ def stylesheet(mode_name):
     QProgressBar {{ border: none; border-radius: 2px; background: {t['border']}; max-height: 4px; min-height: 4px; }}
     QProgressBar::chunk {{ background: {t['accent']}; border-radius: 2px; }}
     QSplitter {{ background: transparent; }}
+    QSplitter::handle {{ background: transparent; }}
+    QSplitter[line="true"]::handle {{ background: {t['border']}; }}
+    QSplitter[line="true"]::handle:hover {{ background: {t['focus']}; }}
     QStatusBar {{ background: {t['bg']}; color: {t['text_muted']}; border: none; }}
 
     /* toast + command palette */

@@ -110,6 +110,11 @@ class RemediationView(QWidget):
         self.vendor_filter.blockSignals(False)
         self.model.set_frame(actions, ACTION_TABLE)
         fit_columns(self.table, max_width=180)
+        self._render_summary()
+        self._filter()
+
+    def _render_summary(self):
+        actions = self.actions
         top = actions.head(5)["risk_removed"].sum() if not actions.empty else 0
         share = f"{top / self.total_risk:.0%}" if self.total_risk else "–"
         by_type = actions["type"].value_counts() if not actions.empty else {}
@@ -119,7 +124,17 @@ class RemediationView(QWidget):
             f"{by_type.get('Configuration', 0)} configuration fixes, {by_type.get('Hardware', 0)} hardware. "
             f"Ranked by risk removed per device touched; the top 5 address about "
             f"<span style='color:{text}'>{share}</span> of total finding risk.")
-        self._filter()
+
+    def refresh_theme(self):
+        """Re-render the rich text that has theme colours baked in (summary and the selected action)."""
+        if not self.actions.empty:
+            self._render_summary()
+            self._show(self.current_action())
+
+    def reset_filters(self):
+        for combo in (self.type_filter, self.vendor_filter):
+            combo.setCurrentIndex(0)
+        self.search.clear()
 
     def _filter(self, *_):
         frame = self.model.frame
@@ -149,9 +164,7 @@ class RemediationView(QWidget):
             self._show(None)
 
     def select_action(self, action_id):
-        self.type_filter.setCurrentIndex(0)
-        self.vendor_filter.setCurrentIndex(0)
-        self.search.clear()
+        self.reset_filters()
         frame = self.model.frame
         for r in range(self.proxy.rowCount()):
             if frame.iloc[self.proxy.source_row(r)]["id"] == action_id:

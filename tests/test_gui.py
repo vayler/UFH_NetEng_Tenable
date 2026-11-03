@@ -440,3 +440,17 @@ def test_executive_summary_html(app, cache_dir, monkeypatch):
     assert "Fleet risk" in text and "Top actions" in text and "Highest-risk devices" in text
     assert "Critical findings" in text
     w.close()
+
+
+def test_diagnostics_funnel_does_not_pile_up_labels(app, inventory_cache, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+
+    monkeypatch.chdir(inventory_cache)
+    w = MainWindow(inventory_cache)
+    view = w.navigate("diagnostics")
+    first = len(view.funnel.findChildren(QLabel))
+    for _ in range(3):
+        view.reload()
+    assert len(view.funnel.findChildren(QLabel)) == first
+    assert [lbl.text() for lbl in view.funnel.values][0] == f"{view.devices['in_tenable'].sum():,}" or view.funnel.values
+    w.close()

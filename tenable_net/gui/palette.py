@@ -175,6 +175,7 @@ class CommandPalette(QWidget):
         self.setObjectName("PaletteScrim")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.fallback = fallback
+        self.search_findings = True
         self.entries = []
         self._return_focus = None
 
@@ -221,9 +222,11 @@ class CommandPalette(QWidget):
         self.hide()
 
     # ---- open / close ----------------------------------------------------------------------
-    def open(self, entries, text=""):
-        """entries: [Entry]; commands first, then search targets."""
+    def open(self, entries, text="", search_findings=True):
+        """entries: [Entry]; commands first, then search targets. search_findings: offer (and fall back to)
+        searching the findings for the typed text."""
         self.entries = entries
+        self.search_findings = search_findings
         self._return_focus = self.window().focusWidget()
         self.place()
         self.input.blockSignals(True)
@@ -263,7 +266,7 @@ class CommandPalette(QWidget):
         query = self.input.text().strip()
         rows = []
         if query:
-            if self.fallback is not None:
+            if self.fallback is not None and self.search_findings:
                 rows.append(Entry(f"Search findings for “{query}”", "Search", "search", "Findings",
                                   run=lambda q=query: self.fallback(q)))
             groups = {}
@@ -326,7 +329,7 @@ class CommandPalette(QWidget):
     def activate(self, index):
         if not index.isValid():
             text = self.input.text().strip()
-            if text and self.fallback is not None:
+            if text and self.fallback is not None and self.search_findings:
                 self.close_palette()
                 QTimer.singleShot(0, lambda: self.fallback(text))
             return
